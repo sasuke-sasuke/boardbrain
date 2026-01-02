@@ -1,0 +1,243 @@
+from __future__ import annotations
+import os
+import streamlit as st
+
+
+def _rerun():
+    """Compatibility helper for Streamlit rerun across versions."""
+    _rerun()
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+
+from boardbrain.case_store import (
+    create_case, list_cases, get_case,
+    add_measurement, add_note,
+    save_attachment, list_measurements, list_notes, list_attachments, init_db
+)
+from boardbrain.diagnose import diagnose
+from boardbrain.config import SETTINGS
+
+st.set_page_config(page_title="BoardBrain v1.1", layout="wide")
+
+init_db()
+os.makedirs(SETTINGS.data_dir, exist_ok=True)
+os.makedirs(SETTINGS.kb_raw_dir, exist_ok=True)
+
+st.title("BoardBrain v1.1 — MacBook USB‑C No‑Power Copilot (schematic-first)")
+
+with st.sidebar:
+    st.header("BoardBrain")
+    mode = st.radio("Mode", ["Cases", "Baselines"], index=0)
+
+if mode == "Baselines":
+    from boardbrain.case_store import (
+        create_baseline, list_baselines, get_baseline,
+        add_baseline_measurement, list_baseline_measurements,
+        save_baseline_attachment, list_baseline_attachments
+    )
+
+    st.sidebar.header("Baselines")
+    baselines = list_baselines()
+    b_ids = ["(new baseline)"] + [b["baseline_id"] for b in baselines]
+    bsel = st.sidebar.selectbox("Open baseline", b_ids)
+
+    if bsel == "(new baseline)":
+        st.subheader("Create baseline")
+        st.caption("Example ID: A2338_820-02020_KG_YYYY-MM-DD")
+        baseline_id = st.text_input("Baseline ID", value="A2338_820-02020_KG_YYYY-MM-DD")
+        device_family = st.text_input("Device family", value="MacBook")
+        model = st.text_input("Model", value="A2338")
+        board_id = st.text_input("Board ID", value="820-02020")
+        quality = st.selectbox("Quality", ["GOLD", "SILVER", "BRONZE"], index=1)
+        source = st.text_input("Source", value="known-good donor / iCloud locked")
+        boot_state = st.text_input("Boot state", value="activation/recovery")
+        notes = st.text_area("Notes", value="")
+        if st.button("Create / Open baseline"):
+            create_baseline(
+                baseline_id=baseline_id,
+                device_family=device_family,
+                model=model,
+                board_id=board_id,
+                quality=quality,
+                source=source,
+                boot_state=boot_state,
+                notes=notes,
+            )
+            if hasattr(st, "rerun"):
+    st.rerun()
+else:
+    _rerun()
+
+    if bsel == "(new baseline)":
+        st.info("Create a baseline in the sidebar to begin.")
+        st.stop()
+
+    b = get_baseline(bsel)
+    if not b:
+        st.error("Baseline not found.")
+        st.stop()
+
+    st.subheader("Baseline")
+    st.write(f"**{b['baseline_id']}** — {b.get('model','')} {b.get('board_id','')}")
+    st.write(f"Quality: {b.get('quality','')} | Source: {b.get('source','')} | Boot: {b.get('boot_state','')}")
+    if b.get("notes"):
+        st.write(b["notes"])
+
+    st.divider()
+    st.subheader("Add baseline measurements")
+    bm_name = st.text_input("Measurement name", value="PPBUS_AON to GND")
+    bm_value = st.text_input("Value", value="")
+    bm_unit = st.text_input("Unit (optional)", value="ohms")
+    bm_note = st.text_input("Note (optional)", value="meter polarity: red to rail")
+    if st.button("Add baseline measurement"):
+        add_baseline_measurement(b["baseline_id"], bm_name, bm_value, bm_unit, bm_note)
+        if hasattr(st, "rerun"):
+    st.rerun()
+else:
+    _rerun()
+
+    st.subheader("Baseline attachments")
+    st.caption("Store reference screenshots/photos/scope captures for this board.")
+    ba_type = st.selectbox("Type", ["board_photo", "scope", "thermal", "boardview_screenshot", "schematic_pdf", "other"], key="ba_type")
+    bup = st.file_uploader("Upload file", key="bup")
+    if st.button("Save baseline attachment") and bup is not None:
+        save_baseline_attachment(b["baseline_id"], bup.name, bup.getvalue(), ba_type)
+        if hasattr(st, "rerun"):
+    st.rerun()
+else:
+    _rerun()
+
+    bats = list_baseline_attachments(b["baseline_id"])
+    if bats:
+        st.write("Saved baseline attachments:")
+        for a in bats:
+            st.write(f"- **{a['type']}**: {a['filename']}")
+
+    st.divider()
+    st.subheader("Baseline measurements")
+    bmeas = list_baseline_measurements(b["baseline_id"])
+    if bmeas:
+        for m in bmeas[-40:]:
+            st.write(f"- {m['name']}: {m['value']} {m.get('unit','')} — {m.get('note','')}")
+    else:
+        st.write("No baseline measurements yet.")
+
+    st.stop()
+
+
+with st.sidebar:
+    st.header("Cases")
+    cases = list_cases()
+    case_ids = ["(new case)"] + [c["case_id"] for c in cases]
+    selected = st.selectbox("Open case", case_ids)
+
+    if selected == "(new case)":
+        st.subheader("Create case")
+        st.caption("Format: A2338_820-02020_NoPower_YYYY-MM-DD")
+        c_model = st.text_input("Model", value="A2338")
+        c_board = st.text_input("Board ID", value="820-02020")
+        c_kind = st.text_input("Issue tag", value="NoPower")
+        c_date = st.text_input("Date", value="YYYY-MM-DD")
+        case_id = st.text_input("Case ID", value=f"{c_model}_{c_board}_{c_kind}_{c_date}")
+        title = st.text_input("Title", value="A2337 No Power")
+        device_family = st.text_input("Device family", value="MacBook")
+        model = st.text_input("Model (free text)", value=c_model)
+        symptom = st.text_area("Symptom", value="USB‑C: 5V ~0.20A, no power")
+        if st.button("Create / Open"):
+            create_case(case_id=case_id, title=title, device_family=device_family, model=model, board_id=c_board, symptom=symptom)
+            if hasattr(st, "rerun"):
+    st.rerun()
+else:
+    _rerun()
+
+if selected == "(new case)":
+    st.info("Create a case in the sidebar to begin.")
+    st.stop()
+
+case = get_case(selected)
+if not case:
+    st.error("Case not found.")
+    st.stop()
+
+col1, col2 = st.columns([1, 1])
+
+with col1:
+    st.subheader("Case info")
+    st.write(f"**{case['case_id']}** — {case['title']}")
+    st.write(f"Model: {case.get('model','')}")
+    st.write(f"Symptom: {case.get('symptom','')}")
+    st.divider()
+
+    st.subheader("Add measurements")
+    m_name = st.text_input("Measurement name", value="USB-C V/A")
+    m_value = st.text_input("Value", value="5V / 0.20A")
+    m_unit = st.text_input("Unit (optional)", value="")
+    m_note = st.text_input("Note (optional)", value="steady draw, no boot")
+    if st.button("Add measurement"):
+        add_measurement(case["case_id"], m_name, m_value, m_unit, m_note)
+        if hasattr(st, "rerun"):
+    st.rerun()
+else:
+    _rerun()
+
+    st.subheader("Notes")
+    note = st.text_area("Add note", value="")
+    if st.button("Add note"):
+        if note.strip():
+            add_note(case["case_id"], note.strip())
+            if hasattr(st, "rerun"):
+    st.rerun()
+else:
+    _rerun()
+
+with col2:
+    st.subheader("Attachments (evidence)")
+    st.caption(
+        "Best: put full selectable-text schematics into kb_raw + ingest. For case-specific truth, upload **schematic page screenshots** and/or **FlexBV boardview screenshots**. "
+        "You can store full boardview files too (for FlexBV), but screenshots are what the assistant can treat as truth."
+    )
+    a_type = st.selectbox("Type", ["schematic", "boardview_screenshot", "boardview_file", "thermal", "microscope", "scope", "other"])
+    up = st.file_uploader("Upload file")
+    if st.button("Save attachment") and up is not None:
+        save_attachment(case["case_id"], up.name, up.getvalue(), a_type)
+        if hasattr(st, "rerun"):
+    st.rerun()
+else:
+    _rerun()
+
+    atts = list_attachments(case["case_id"])
+    if atts:
+        st.write("Saved attachments:")
+        for a in atts:
+            st.write(f"- **{a['type']}**: {a['filename']}")
+    else:
+        st.warning("No attachments yet.")
+
+st.divider()
+left, right = st.columns([1, 1])
+
+with left:
+    st.subheader("Measurements / notes (recent)")
+    meas = list_measurements(case["case_id"])
+    if meas:
+        for m in meas[-12:]:
+            st.write(f"- {m['name']}: {m['value']} {m.get('unit','')} — {m.get('note','')}")
+    else:
+        st.write("No measurements yet.")
+
+    notes = list_notes(case["case_id"])
+    if notes:
+        st.write("Notes:")
+        for n in notes[-10:]:
+            st.write(f"- {n['note']}")
+
+with right:
+    st.subheader("Generate plan")
+    question = st.text_area("Prompt", value="Give me the fastest schematic-grounded triage plan for this no-power case.")
+    include_images = st.checkbox("Include schematic/boardview images", value=True)
+    if st.button("Generate plan"):
+        with st.spinner("Thinking..."):
+            answer = diagnose(case, question, include_images=include_images)
+        st.markdown(answer)
