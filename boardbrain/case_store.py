@@ -1,6 +1,7 @@
 from __future__ import annotations
 import os
 import shutil
+import json
 import sqlite3
 from typing import Optional, List, Dict, Any
 from .config import SETTINGS
@@ -77,6 +78,36 @@ CREATE TABLE IF NOT EXISTS baseline_attachments (
     created_at TEXT NOT NULL,
     FOREIGN KEY(baseline_id) REFERENCES baselines(baseline_id)
 );
+
+CREATE TABLE IF NOT EXISTS chat_messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    case_id TEXT NOT NULL,
+    role TEXT NOT NULL,
+    content TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    meta_json TEXT NULL
+);
+
+CREATE TABLE IF NOT EXISTS plan_versions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    case_id TEXT NOT NULL,
+    version INTEGER NOT NULL,
+    plan_markdown TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    derived_from_message_id INTEGER NULL,
+    citations_json TEXT NULL
+);
+
+CREATE TABLE IF NOT EXISTS requested_measurements (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    case_id TEXT NOT NULL,
+    key TEXT NOT NULL,
+    prompt TEXT NOT NULL,
+    status TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    resolved_at TEXT NULL,
+    meta_json TEXT NULL
+);
 """
 
 
@@ -104,6 +135,7 @@ def create_case(case_id: str, title: str, device_family: str = "MacBook", model:
     import datetime
     init_db()
     with _conn() as c:
+        title = make_unique_case_title(title)
         c.execute(
             "INSERT OR REPLACE INTO cases(case_id,title,device_family,model,board_id,symptom,created_at) VALUES(?,?,?,?,?,?,?)",
             (case_id, title, device_family, model, board_id, symptom, datetime.datetime.utcnow().isoformat()),
@@ -131,6 +163,9 @@ def delete_case(case_id: str) -> bool:
         exists = c.execute("SELECT 1 FROM cases WHERE case_id=?", (case_id,)).fetchone()
         if not exists:
             return False
+        c.execute("DELETE FROM chat_messages WHERE case_id=?", (case_id,))
+        c.execute("DELETE FROM plan_versions WHERE case_id=?", (case_id,))
+        c.execute("DELETE FROM requested_measurements WHERE case_id=?", (case_id,))
         c.execute("DELETE FROM attachments WHERE case_id=?", (case_id,))
         c.execute("DELETE FROM notes WHERE case_id=?", (case_id,))
         c.execute("DELETE FROM measurements WHERE case_id=?", (case_id,))
@@ -139,6 +174,54 @@ def delete_case(case_id: str) -> bool:
     if os.path.isdir(case_dir):
         shutil.rmtree(case_dir, ignore_errors=True)
     return True
+
+
+def make_unique_case_title(base_title: str) -> str:
+    init_db()
+    base = base_title.strip() or "Untitled"
+    with _conn() as c:
+        rows = c.execute("SELECT title FROM cases").fetchall()
+    titles = {r[0] for r in rows}
+    if base not in titles:
+        return base
+    n = 2
+    while True:
+        candidate = f"{base} ({n})"
+        if candidate not in titles:
+            return candidate
+        n += 1
+
+
+def get_case_delete_summary(case_id: str) -> Dict[str, Any]:
+    init_db()
+    summary: Dict[str, Any] = {}
+    with _conn() as c:
+        summary["chat_messages"] = c.execute(
+            "SELECT COUNT(*) FROM chat_messages WHERE case_id=?", (case_id,)
+        ).fetchone()[0]
+        summary["plan_versions"] = c.execute(
+            "SELECT COUNT(*) FROM plan_versions WHERE case_id=?", (case_id,)
+        ).fetchone()[0]
+        summary["requested_measurements"] = c.execute(
+            "SELECT COUNT(*) FROM requested_measurements WHERE case_id=?", (case_id,)
+        ).fetchone()[0]
+        summary["measurements"] = c.execute(
+            "SELECT COUNT(*) FROM measurements WHERE case_id=?", (case_id,)
+        ).fetchone()[0]
+        summary["notes"] = c.execute(
+            "SELECT COUNT(*) FROM notes WHERE case_id=?", (case_id,)
+        ).fetchone()[0]
+        summary["attachments"] = c.execute(
+            "SELECT COUNT(*) FROM attachments WHERE case_id=?", (case_id,)
+        ).fetchone()[0]
+    case_dir = get_case_dir(case_id)
+    file_count = 0
+    if os.path.isdir(case_dir):
+        for root, _, files in os.walk(case_dir):
+            file_count += len(files)
+    summary["case_dir_exists"] = os.path.isdir(case_dir)
+    summary["case_dir_files"] = file_count
+    return summary
 
 
 # ---- Baseline Library ----
@@ -305,3 +388,134 @@ def list_attachments(case_id: str) -> List[Dict[str, Any]]:
     with _conn() as c:
         rows = c.execute("SELECT filename,rel_path,type,created_at FROM attachments WHERE case_id=? ORDER BY created_at ASC", (case_id,)).fetchall()
     return [{"filename": r[0], "rel_path": r[1], "type": r[2], "created_at": r[3]} for r in rows]
+
+
+def add_chat_message(case_id: str, role: str, content: str, meta: Optional[Dict[str, Any]] = None) -> int:
+    import datetime
+    init_db()
+    meta_json = json.dumps(meta) if meta is not None else None
+    with _conn() as c:
+        cur = c.execute(
+            "INSERT INTO chat_messages(case_id,role,content,created_at,meta_json) VALUES(?,?,?,?,?)",
+            (case_id, role, content, datetime.datetime.utcnow().isoformat(), meta_json),
+        )
+        return int(cur.lastrowid)
+
+
+def list_chat_messages(case_id: str) -> List[Dict[str, Any]]:
+    init_db()
+    with _conn() as c:
+        rows = c.execute(
+            "SELECT id,role,content,created_at,meta_json FROM chat_messages WHERE case_id=? ORDER BY created_at ASC",
+            (case_id,),
+        ).fetchall()
+    out = []
+    for r in rows:
+        meta = json.loads(r[4]) if r[4] else None
+        out.append({"id": r[0], "role": r[1], "content": r[2], "created_at": r[3], "meta": meta})
+    return out
+
+
+def add_plan_version(
+    case_id: str,
+    plan_markdown: str,
+    citations: Optional[Dict[str, Any]] = None,
+    derived_from_message_id: Optional[int] = None,
+) -> int:
+    import datetime
+    init_db()
+    citations_json = json.dumps(citations) if citations is not None else None
+    with _conn() as c:
+        v = c.execute(
+            "SELECT COALESCE(MAX(version), 0) + 1 FROM plan_versions WHERE case_id=?",
+            (case_id,),
+        ).fetchone()[0]
+        cur = c.execute(
+            "INSERT INTO plan_versions(case_id,version,plan_markdown,created_at,derived_from_message_id,citations_json) VALUES(?,?,?,?,?,?)",
+            (case_id, v, plan_markdown, datetime.datetime.utcnow().isoformat(), derived_from_message_id, citations_json),
+        )
+        return int(cur.lastrowid)
+
+
+def get_latest_plan(case_id: str) -> Optional[str]:
+    init_db()
+    with _conn() as c:
+        r = c.execute(
+            "SELECT plan_markdown FROM plan_versions WHERE case_id=? ORDER BY version DESC LIMIT 1",
+            (case_id,),
+        ).fetchone()
+    return r[0] if r else None
+
+
+def list_plan_versions(case_id: str) -> List[Dict[str, Any]]:
+    init_db()
+    with _conn() as c:
+        rows = c.execute(
+            "SELECT id,version,plan_markdown,created_at,derived_from_message_id,citations_json FROM plan_versions WHERE case_id=? ORDER BY version DESC",
+            (case_id,),
+        ).fetchall()
+    out = []
+    for r in rows:
+        citations = json.loads(r[5]) if r[5] else None
+        out.append(
+            {
+                "id": r[0],
+                "version": r[1],
+                "plan_markdown": r[2],
+                "created_at": r[3],
+                "derived_from_message_id": r[4],
+                "citations": citations,
+            }
+        )
+    return out
+
+
+def set_requested_measurements(case_id: str, items: List[Dict[str, Any]]) -> None:
+    import datetime
+    init_db()
+    now = datetime.datetime.utcnow().isoformat()
+    rows = []
+    for it in items:
+        meta_json = json.dumps(it.get("meta")) if it.get("meta") is not None else None
+        rows.append((case_id, it["key"], it["prompt"], "pending", now, None, meta_json))
+    with _conn() as c:
+        c.execute("DELETE FROM requested_measurements WHERE case_id=?", (case_id,))
+        if rows:
+            c.executemany(
+                "INSERT INTO requested_measurements(case_id,key,prompt,status,created_at,resolved_at,meta_json) VALUES(?,?,?,?,?,?,?)",
+                rows,
+            )
+
+
+def mark_requested_measurement_done(case_id: str, key: str) -> None:
+    import datetime
+    init_db()
+    with _conn() as c:
+        c.execute(
+            "UPDATE requested_measurements SET status=?, resolved_at=? WHERE case_id=? AND key=?",
+            ("done", datetime.datetime.utcnow().isoformat(), case_id, key),
+        )
+
+
+def list_requested_measurements(case_id: str) -> List[Dict[str, Any]]:
+    init_db()
+    with _conn() as c:
+        rows = c.execute(
+            "SELECT id,key,prompt,status,created_at,resolved_at,meta_json FROM requested_measurements WHERE case_id=? ORDER BY created_at ASC",
+            (case_id,),
+        ).fetchall()
+    out = []
+    for r in rows:
+        meta = json.loads(r[6]) if r[6] else None
+        out.append(
+            {
+                "id": r[0],
+                "key": r[1],
+                "prompt": r[2],
+                "status": r[3],
+                "created_at": r[4],
+                "resolved_at": r[5],
+                "meta": meta,
+            }
+        )
+    return out

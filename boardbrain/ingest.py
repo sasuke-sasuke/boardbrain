@@ -2,12 +2,17 @@ from __future__ import annotations
 import os
 import hashlib
 import re
+import json
 from typing import Dict, Any, List, Tuple
 import fitz  # PyMuPDF
 from .config import SETTINGS
 from .chunking import chunk_text
 from .oai import embed_text
 from .rag import upsert_text_chunks
+from .components import extract_refdes_tokens
+from .netlist import extract_known_nets_from_texts, load_netlist, write_netlist_cache
+from .net_refs import build_net_refs_from_texts, write_net_refs_cache, load_net_refs
+from .boardview import parse_boardview, write_boardview_cache, detect_boardview_format
 
 TEXT_EXTS = {".txt", ".md", ".csv", ".tsv"}
 PDF_EXTS = {".pdf"}
@@ -104,17 +109,217 @@ def ingest_text_file(path: str) -> List[Tuple[str, Dict[str, Any]]]:
 def main() -> None:
     os.makedirs(SETTINGS.kb_raw_dir, exist_ok=True)
     all_items: List[Tuple[str, Dict[str, Any]]] = []
+    component_counts: Dict[str, Dict[str, int]] = {}
+    net_ref_texts: Dict[str, List[str]] = {}
+    boardview_candidates: List[str] = []
+    boardview_reports: Dict[str, Dict[str, Any]] = {}
+    boardview_force = os.getenv("BOARDVIEW_FORCE", "0").strip() == "1"
+
+    def _kb_paths_for_board(board_id: str) -> List[str]:
+        matches = []
+        if not board_id:
+            return matches
+        for root, dirs, _ in os.walk(SETTINGS.kb_raw_dir):
+            path = root.replace("\\", "/")
+            if board_id in path:
+                matches.append(root)
+        return sorted(set(matches))
 
     for root, _, files in os.walk(SETTINGS.kb_raw_dir):
         for fn in files:
             path = os.path.join(root, fn)
             ext = os.path.splitext(fn)[1].lower()
-            if ext in PDF_EXTS:
-                all_items.extend(ingest_pdf(path))
-            elif ext in TEXT_EXTS:
-                all_items.extend(ingest_text_file(path))
+            if fn.startswith("."):
+                continue
+            if ext in PDF_EXTS and not boardview_force:
+                items = ingest_pdf(path)
+                all_items.extend(items)
+                board_id = infer_board_id(path) or ""
+                if board_id:
+                    for chunk, _ in items:
+                        counts = extract_refdes_tokens(chunk)
+                        for ref, ct in counts.items():
+                            component_counts.setdefault(board_id, {})
+                            component_counts[board_id][ref] = component_counts[board_id].get(ref, 0) + ct
+                        net_ref_texts.setdefault(board_id, []).append(chunk)
+            elif ext in TEXT_EXTS and not boardview_force:
+                items = ingest_text_file(path)
+                all_items.extend(items)
+                board_id = infer_board_id(path) or ""
+                if board_id:
+                    for chunk, _ in items:
+                        counts = extract_refdes_tokens(chunk)
+                        for ref, ct in counts.items():
+                            component_counts.setdefault(board_id, {})
+                            component_counts[board_id][ref] = component_counts[board_id].get(ref, 0) + ct
+                        net_ref_texts.setdefault(board_id, []).append(chunk)
+            elif "boardview" in path.lower():
+                boardview_candidates.append(path)
 
-    if not all_items:
+    def _bv_priority(p: str) -> tuple:
+        ext = os.path.splitext(p)[1].lower()
+        return (0 if ext == ".bvr" else 1, p)
+    boardview_candidates = sorted(set(boardview_candidates), key=_bv_priority)
+    def _parser_id(parser: str | None) -> str:
+        if not parser:
+            return "unknown"
+        if parser.upper() == "BVRAW_FORMAT_3":
+            return "bvraw3"
+        return parser.lower()
+    if boardview_candidates:
+        print(f"Found {len(boardview_candidates)} boardview candidate file(s).")
+        for p in boardview_candidates:
+            try:
+                size = os.path.getsize(p)
+            except Exception:
+                size = -1
+            ext = os.path.splitext(p)[1].lower()
+            print(f"[boardview] found: {p} (size={size} bytes, ext={ext})")
+    else:
+        print("No boardview files detected under kb_raw/.../boardview/")
+
+    boardview_done: set[str] = set()
+    boardview_by_board: Dict[str, List[str]] = {}
+    for path in boardview_candidates:
+        board_id = infer_board_id(path) or ""
+        if not board_id:
+            continue
+        boardview_by_board.setdefault(board_id, []).append(path)
+
+    for board_id, paths in boardview_by_board.items():
+        paths_sorted = sorted(paths, key=_bv_priority)
+        report = {
+            "detected_boardview_files": [],
+            "selected_boardview_file": None,
+            "parser_used": None,
+            "parse_status": "fail",
+            "parse_error": None,
+            "outputs_written": {
+                "netlist_path": None,
+                "net_refs_path": None,
+                "boardview_cache_path": None,
+                "components_path": None,
+            },
+            "counts": {
+                "nets_count_from_boardview": 0,
+                "refs_pairs_count_from_boardview": 0,
+            },
+        }
+        for p in paths_sorted:
+            try:
+                size = os.path.getsize(p)
+            except Exception:
+                size = -1
+            report["detected_boardview_files"].append(
+                {"path": p, "size_bytes": size, "ext": os.path.splitext(p)[1].lower()}
+            )
+        selected = None
+        parser_used = None
+        for p in paths_sorted:
+            try:
+                with open(p, "rb") as f:
+                    head = f.read(256)
+                parser_used = detect_boardview_format(p, head)
+                if parser_used:
+                    selected = p
+                    break
+            except Exception:
+                continue
+        if not selected:
+            selected = paths_sorted[0]
+            parser_used = "unknown"
+        report["selected_boardview_file"] = selected
+        report["parser_used"] = parser_used
+        print(f"[boardview] selected: {selected} (parser={parser_used})")
+        if parser_used in (None, "unknown"):
+            report["parse_error"] = "unsupported_format"
+            boardview_reports[board_id] = report
+            print(f"[boardview] parse failed: {selected} (unsupported format)")
+            continue
+        try:
+            nets, net_to_refs, meta = parse_boardview(selected)
+        except Exception as e:
+            report["parse_error"] = str(e)
+            boardview_reports[board_id] = report
+            print(f"[boardview] parse failed: {selected} ({e})")
+            continue
+        parser_used = meta.get("format") or parser_used or "unknown"
+        parser_id = _parser_id(parser_used)
+        meta.update(
+            {
+                "source": f"boardview_{parser_id}",
+                "source_path": selected,
+                "source_file": rel_source_file(selected),
+                "board_id": board_id,
+                "model": infer_model(selected) or "",
+            }
+        )
+        boardview_cache_path = write_boardview_cache(board_id, nets, net_to_refs, meta)
+        net_meta = dict(meta)
+        net_meta["source"] = f"boardview_{parser_id}"
+        net_meta["net_count"] = len(nets)
+        net_meta["pp_net_count"] = len([n for n in nets if n.startswith("PP")])
+        net_meta["signal_net_count"] = len([n for n in nets if not n.startswith("PP")])
+        netlist_path = write_netlist_cache(board_id, nets, net_meta)
+        refs_meta = {
+            "source": f"boardview_{parser_id}",
+            "board_id": board_id,
+            "model": infer_model(selected) or "",
+            "net_count": len(net_to_refs),
+            "pairs_count": sum(len(v) for v in net_to_refs.values()),
+        }
+        net_refs_path = write_net_refs_cache(board_id, net_to_refs, refs_meta)
+        components = meta.get("components") or sorted({r for refs in net_to_refs.values() for r in [d.get("refdes") for d in refs if d.get("refdes")]})
+        prefix_histogram: Dict[str, int] = {}
+        for ref in components:
+            if ref.startswith("FB"):
+                prefix = "FB"
+            elif ref.startswith("TP"):
+                prefix = "TP"
+            else:
+                prefix = ref[:1]
+            prefix_histogram[prefix] = prefix_histogram.get(prefix, 0) + 1
+        comp_dir = os.path.join(SETTINGS.data_dir, "components")
+        os.makedirs(comp_dir, exist_ok=True)
+        comp_path = os.path.join(comp_dir, f"{board_id}.json")
+        import datetime
+        comp_payload = {
+            "board_id": board_id,
+            "components": components,
+            "refdes": components,
+            "component_count": len(components),
+            "prefix_histogram": prefix_histogram,
+            "source": f"boardview_{parser_id}",
+            "updated_at": datetime.datetime.utcnow().isoformat(),
+        }
+        with open(comp_path, "w", encoding="utf-8") as f:
+            f.write(json.dumps(comp_payload, indent=2))
+        report["parse_status"] = "success"
+        report["parser_used"] = parser_used
+        report["counts"]["nets_count_from_boardview"] = len(nets)
+        report["counts"]["refs_pairs_count_from_boardview"] = refs_meta["pairs_count"]
+        report["outputs_written"]["netlist_path"] = netlist_path
+        report["outputs_written"]["net_refs_path"] = net_refs_path
+        report["outputs_written"]["boardview_cache_path"] = boardview_cache_path
+        report["outputs_written"]["components_path"] = comp_path
+        boardview_reports[board_id] = report
+        boardview_done.add(board_id)
+        print(f"[boardview] parse success: {board_id} ({len(nets)} nets, {refs_meta['pairs_count']} refs)")
+
+    if boardview_reports:
+        report_dir = os.path.join(SETTINGS.data_dir, "ingest_reports")
+        os.makedirs(report_dir, exist_ok=True)
+        for board_id, report in boardview_reports.items():
+            report_path = os.path.join(report_dir, f"{board_id}.json")
+            with open(report_path, "w", encoding="utf-8") as f:
+                json.dump(report, f, indent=2)
+            print(f"[boardview] ingest report: {report_path}")
+
+    if boardview_force and not boardview_done:
+        print("BOARDVIEW_FORCE=1 set; no successful boardview parses. Skipping kb_text ingest.")
+        return
+
+    if not all_items and not boardview_done:
         print("No ingestible text found. Tip: many schematics are image-only. Use schematic screenshots as CASE evidence in the app for v1.")
         return
 
@@ -132,6 +337,51 @@ def main() -> None:
         print(f"Ingested {start+len(batch)}/{len(all_items)} chunks")
 
     print("Done. KB ready.")
+
+    boardview_failed = {bid for bid, rep in boardview_reports.items() if rep.get("parse_status") == "fail"}
+
+    if component_counts:
+        import datetime
+        comp_dir = os.path.join(SETTINGS.data_dir, "components")
+        os.makedirs(comp_dir, exist_ok=True)
+        for board_id, counts in component_counts.items():
+            if board_id in boardview_done or board_id in boardview_failed:
+                continue
+            filtered = {k: v for k, v in counts.items() if v >= 2}
+            if not filtered:
+                continue
+            path = os.path.join(comp_dir, f"{board_id}.json")
+            data = {
+                "board_id": board_id,
+                "refdes": sorted(filtered.keys()),
+                "counts": filtered,
+                "source": "kb_text",
+                "updated_at": datetime.datetime.utcnow().isoformat(),
+            }
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(json.dumps(data, indent=2))
+        print("Component index updated.")
+
+    if net_ref_texts and not boardview_force:
+        for board_id, texts in net_ref_texts.items():
+            if board_id in boardview_done or board_id in boardview_failed:
+                continue
+            existing_refs, existing_meta = load_net_refs(board_id)
+            if existing_refs and str(existing_meta.get("source", "")).startswith("boardview_"):
+                continue
+            known_nets, _ = load_netlist(board_id=board_id)
+            if not known_nets:
+                known_nets, _ = extract_known_nets_from_texts(texts)
+            ref_counts = component_counts.get(board_id, {})
+            known_refdes = {k for k, v in ref_counts.items() if v >= 2}
+            if not known_nets or not known_refdes:
+                continue
+            net_to_refdes, meta = build_net_refs_from_texts(texts, known_nets, known_refdes)
+            meta["kb_paths"] = _kb_paths_for_board(board_id)
+            meta["net_count"] = len(known_nets)
+            meta["refdes_count"] = len(known_refdes)
+            write_net_refs_cache(board_id, net_to_refdes, meta)
+        print("Net→RefDes index updated.")
 
 if __name__ == "__main__":
     main()

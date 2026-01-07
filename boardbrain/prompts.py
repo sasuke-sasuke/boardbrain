@@ -13,11 +13,4 @@ WORKFLOW
 3) Always request the NEXT minimal measurement needed when uncertain.
 4) Avoid shotgunning unless it matches a known failure pattern with acceptable time cost.
 5) No blind reflowing.
-
-OUTPUT FORMAT
-## Do this now (steps)
-## Decision branches
-## Evidence used
-## What is confirmed vs inferred
-## Repair log draft
 """
