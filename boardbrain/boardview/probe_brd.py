@@ -1,0 +1,35 @@
+from __future__ import annotations
+
+import argparse
+import json
+from pathlib import Path
+
+from .brd_parser import parse_brd
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description="Probe a .brd boardview file.")
+    ap.add_argument("path", help="Path to .brd file")
+    args = ap.parse_args()
+    path = Path(args.path)
+    if not path.exists():
+        print(f"[probe] file not found: {path}")
+        return 2
+    nets, net_to_refs, meta = parse_brd(str(path))
+    print(f"[probe] format: {meta.get('format')}")
+    print(f"[probe] nets: {len(nets)}")
+    print(f"[probe] components: {meta.get('components_count')}")
+    print(f"[probe] pairs: {meta.get('pairs_count')}")
+    print(f"[probe] testpoints: {meta.get('testpoints_count')}")
+    sample_nets = sorted(list(nets))[:20]
+    if sample_nets:
+        print("[probe] sample nets:", ", ".join(sample_nets))
+    if net_to_refs:
+        first = next(iter(net_to_refs.keys()))
+        print("[probe] sample net refs:", first, "->", [r.get("refdes") for r in net_to_refs[first][:10]])
+    print(json.dumps(meta, indent=2))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

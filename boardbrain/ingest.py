@@ -3,7 +3,9 @@ import os
 import hashlib
 import re
 import json
+import io
 from typing import Dict, Any, List, Tuple
+from contextlib import redirect_stderr
 import fitz  # PyMuPDF
 from .config import SETTINGS
 from .chunking import chunk_text
@@ -32,17 +34,17 @@ def infer_doc_type(path: str) -> str:
     return "note"
 
 
-_RE_BOARD_ID = re.compile(r"\b\d{3}-\d{5}\b")
+_RE_BOARD_ID = re.compile(r"\b\d{3}-\d{5}(?:_\d{3}-\d{5})?\b")
 _RE_MODEL = re.compile(r"\bA\d{4}\b", re.IGNORECASE)
 
 
 def infer_board_id(path: str) -> str | None:
-    m = _RE_BOARD_ID.search(path)
+    m = _RE_BOARD_ID.search(path.strip())
     return m.group(0) if m else None
 
 
 def infer_model(path: str) -> str | None:
-    m = _RE_MODEL.search(path)
+    m = _RE_MODEL.search(path.strip())
     return m.group(0).upper() if m else None
 
 
@@ -67,10 +69,56 @@ def infer_device_family(path: str) -> str | None:
 
 def ingest_pdf(path: str) -> List[Tuple[str, Dict[str, Any]]]:
     out: List[Tuple[str, Dict[str, Any]]] = []
-    doc = fitz.open(path)
+    try:
+        fitz.TOOLS.set_verbosity(0)
+    except Exception:
+        pass
+    def _suppress_stderr():
+        import contextlib
+        import os
+        import sys
+        @contextlib.contextmanager
+        def _ctx():
+            fd = None
+            try:
+                fd = os.dup(2)
+                with open(os.devnull, "w") as devnull:
+                    os.dup2(devnull.fileno(), 2)
+                    yield
+            except Exception:
+                yield
+            finally:
+                try:
+                    if fd is not None:
+                        os.dup2(fd, 2)
+                        os.close(fd)
+                except Exception:
+                    pass
+        return _ctx()
+    try:
+        with open(path, "rb") as f:
+            header = f.read(5)
+        if header != b"%PDF-":
+            print(f"[pdf] skipped {path} reason=header_mismatch")
+            return out
+    except Exception as e:
+        print(f"[pdf] skipped {path} reason={e}")
+        return out
+    err_buf = io.StringIO()
+    try:
+        with _suppress_stderr():
+            with redirect_stderr(err_buf):
+                doc = fitz.open(path)
+    except Exception as e:
+        print(f"[pdf] skipped {path} reason={e}")
+        return out
     for i in range(len(doc)):
-        page = doc[i]
-        text = (page.get_text("text") or "").strip()
+        try:
+            with _suppress_stderr():
+                page = doc[i]
+                text = (page.get_text("text") or "").strip()
+        except Exception:
+            continue
         if not text:
             continue  # v1: skip image-only pages
         for j, chunk in enumerate(chunk_text(text)):
@@ -82,10 +130,13 @@ def ingest_pdf(path: str) -> List[Tuple[str, Dict[str, Any]]]:
                 "doc_type": infer_doc_type(path),
                 "board_id": infer_board_id(path),
                 "model": infer_model(path),
-            "device_family": infer_device_family(path),
+                "device_family": infer_device_family(path),
             }
             out.append((chunk, meta))
-    doc.close()
+    try:
+        doc.close()
+    except Exception:
+        pass
     return out
 
 def ingest_text_file(path: str) -> List[Tuple[str, Dict[str, Any]]]:
@@ -125,6 +176,57 @@ def main() -> None:
                 matches.append(root)
         return sorted(set(matches))
 
+    def _find_boardview_candidates(board_id: str, family: str | None, model: str | None) -> List[str]:
+        if not board_id:
+            return []
+        roots = []
+        if family:
+            fam_root = os.path.join(SETTINGS.kb_raw_dir, family)
+            if os.path.isdir(fam_root):
+                roots.append(fam_root)
+        if not roots:
+            roots = [SETTINGS.kb_raw_dir]
+        candidates = []
+        for r in roots:
+            for root, _, files in os.walk(r):
+                path = root.replace("\\", "/")
+                if board_id not in path:
+                    continue
+                if "boardview" not in path.lower():
+                    continue
+                for fn in files:
+                    if fn.startswith("."):
+                        continue
+                    full = os.path.join(root, fn)
+                    if board_id not in full:
+                        continue
+                    candidates.append(full)
+        return sorted(set(candidates))
+
+    def _choose_boardview_file(board_id: str, candidates: List[str]) -> str | None:
+        if not candidates:
+            return None
+        family = None
+        if candidates:
+            parts = candidates[0].replace("\\", "/").split("/")
+            if "kb_raw" in parts:
+                idx = parts.index("kb_raw")
+                if idx + 1 < len(parts):
+                    family = parts[idx + 1]
+        exts = []
+        for p in candidates:
+            ext = os.path.splitext(p)[1].lower()
+            exts.append((p, ext))
+        if family and family.lower() == "iphone":
+            pref = [".pcb", ".bvr", ".brd"]
+        else:
+            pref = [".bvr", ".pcb", ".brd"]
+        for ext in pref:
+            matches = [p for p, e in exts if e == ext]
+            if matches:
+                return sorted(matches)[0]
+        return sorted(candidates)[0]
+
     for root, _, files in os.walk(SETTINGS.kb_raw_dir):
         for fn in files:
             path = os.path.join(root, fn)
@@ -154,7 +256,8 @@ def main() -> None:
                             component_counts[board_id][ref] = component_counts[board_id].get(ref, 0) + ct
                         net_ref_texts.setdefault(board_id, []).append(chunk)
             elif "boardview" in path.lower():
-                boardview_candidates.append(path)
+                if infer_board_id(path):
+                    boardview_candidates.append(path)
 
     def _bv_priority(p: str) -> tuple:
         ext = os.path.splitext(p)[1].lower()
@@ -187,7 +290,10 @@ def main() -> None:
         boardview_by_board.setdefault(board_id, []).append(path)
 
     for board_id, paths in boardview_by_board.items():
-        paths_sorted = sorted(paths, key=_bv_priority)
+        family = infer_device_family(paths[0]) if paths else None
+        model = infer_model(paths[0]) if paths else None
+        scoped = _find_boardview_candidates(board_id, family, model)
+        paths_sorted = scoped if scoped else sorted(paths, key=_bv_priority)
         report = {
             "detected_boardview_files": [],
             "selected_boardview_file": None,
@@ -203,6 +309,7 @@ def main() -> None:
             "counts": {
                 "nets_count_from_boardview": 0,
                 "refs_pairs_count_from_boardview": 0,
+                "components_count_from_boardview": 0,
             },
         }
         for p in paths_sorted:
@@ -213,26 +320,27 @@ def main() -> None:
             report["detected_boardview_files"].append(
                 {"path": p, "size_bytes": size, "ext": os.path.splitext(p)[1].lower()}
             )
-        selected = None
+        selected = _choose_boardview_file(board_id, paths_sorted)
         parser_used = None
-        for p in paths_sorted:
+        if selected:
             try:
-                with open(p, "rb") as f:
+                with open(selected, "rb") as f:
                     head = f.read(256)
-                parser_used = detect_boardview_format(p, head)
-                if parser_used:
-                    selected = p
-                    break
+                parser_used = detect_boardview_format(selected, head)
             except Exception:
-                continue
+                parser_used = "unknown"
         if not selected:
-            selected = paths_sorted[0]
-            parser_used = "unknown"
+            report["parse_error"] = "no_boardview_candidates"
+            boardview_reports[board_id] = report
+            continue
         report["selected_boardview_file"] = selected
         report["parser_used"] = parser_used
         print(f"[boardview] selected: {selected} (parser={parser_used})")
         if parser_used in (None, "unknown"):
             report["parse_error"] = "unsupported_format"
+            report["parse_status"] = "unsupported_format"
+            report["parser_used"] = parser_used or "unknown"
+            report["source_reason"] = "boardview_unsupported"
             boardview_reports[board_id] = report
             print(f"[boardview] parse failed: {selected} (unsupported format)")
             continue
@@ -240,6 +348,12 @@ def main() -> None:
             nets, net_to_refs, meta = parse_boardview(selected)
         except Exception as e:
             report["parse_error"] = str(e)
+            if str(e) in ("unsupported_format", "no_valid_zlib_streams", "no_valid_streams"):
+                report["parse_status"] = "unsupported_format"
+                report["source_reason"] = "boardview_unsupported"
+            elif str(e) == "xzzpcb_missing_or_invalid_key":
+                report["parse_status"] = "fail"
+                report["source_reason"] = "boardview_key_missing"
             boardview_reports[board_id] = report
             print(f"[boardview] parse failed: {selected} ({e})")
             continue
@@ -294,10 +408,16 @@ def main() -> None:
         }
         with open(comp_path, "w", encoding="utf-8") as f:
             f.write(json.dumps(comp_payload, indent=2))
-        report["parse_status"] = "success"
+        parse_status = meta.get("parse_status") or "success"
+        report["parse_status"] = parse_status
+        if parse_status == "partial_success":
+            report["source_reason"] = "boardview_partial"
+        else:
+            report["source_reason"] = "boardview_success"
         report["parser_used"] = parser_used
         report["counts"]["nets_count_from_boardview"] = len(nets)
         report["counts"]["refs_pairs_count_from_boardview"] = refs_meta["pairs_count"]
+        report["counts"]["components_count_from_boardview"] = len(components)
         report["outputs_written"]["netlist_path"] = netlist_path
         report["outputs_written"]["net_refs_path"] = net_refs_path
         report["outputs_written"]["boardview_cache_path"] = boardview_cache_path

@@ -36,6 +36,8 @@ def load_component_index(board_id: str = "", model: str = "", case: Optional[Dic
         board_id = (case.get("board_id") or "").strip()
     if not model and case:
         model = (case.get("model") or "").strip()
+    board_id = (board_id or "").strip()
+    model = (model or "").strip()
     key = board_id or model or "unknown"
     if key in _COMPONENT_CACHE:
         return _COMPONENT_CACHE[key]

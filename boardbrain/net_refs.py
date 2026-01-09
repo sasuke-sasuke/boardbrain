@@ -107,6 +107,8 @@ def load_net_refs(
         board_id = case.get("board_id", "") or ""
     if not model and case:
         model = case.get("model", "") or ""
+    board_id = (board_id or "").strip()
+    model = (model or "").strip()
     path = _cache_path(board_id, model)
     meta: Dict[str, Any] = {"cache_path": path}
     if not os.path.exists(path):

@@ -5,8 +5,8 @@ import re
 import struct
 from typing import Dict, Any, List, Tuple, Optional
 
-from .config import SETTINGS
-from .netlist import canonicalize_net_name
+from ..config import SETTINGS
+from ..netlist import canonicalize_net_name
 
 
 _NET_RE = re.compile(r"\b(?:PP[A-Z0-9_.]+|[A-Z][A-Z0-9_.]*_[A-Z0-9_.]+)\b", re.IGNORECASE)
@@ -28,6 +28,15 @@ def detect_boardview_format(path: str, data: bytes) -> str | None:
         return "BVR2"
     if magic[:3] == b"BVR":
         return "BVR"
+    if ext == ".pcb":
+        from .xzzpcb_parser import verify_xzzpcb
+        if verify_xzzpcb(data):
+            return "XZZPCB"
+    if ext == ".brd":
+        if data.startswith(b"\x23\xe2\x63\x28") or b"str_length:" in data or b"var_data:" in data or b"BRDOUT:" in data:
+            return "BRD"
+    if ext == ".pcb":
+        return "PCB_EMBEDDED_ZLIB"
     if ext == ".bvr":
         return None
     return None
@@ -154,14 +163,13 @@ def _build_net_refs_from_pin_table(
     return {n: list(refs.values()) for n, refs in net_to_refs.items()}
 
 
-def parse_bvraw_format_3(path: str) -> Tuple[set[str], Dict[str, List[Dict[str, Any]]], Dict[str, Any]]:
+def parse_bvraw_format_3_text(text: str) -> Tuple[set[str], Dict[str, List[Dict[str, Any]]], Dict[str, Any]]:
     nets: set[str] = set()
     refdes: set[str] = set()
     net_to_refs: Dict[str, Dict[str, Dict[str, Any]]] = {}
     current_part: str | None = None
 
-    with open(path, "r", encoding="utf-8", errors="ignore") as f:
-        lines = f.read().splitlines()
+    lines = text.splitlines()
     if not lines:
         raise ValueError("empty_bvraw3_file")
     header = lines[0].strip()
@@ -206,6 +214,12 @@ def parse_bvraw_format_3(path: str) -> Tuple[set[str], Dict[str, List[Dict[str, 
     return nets, {n: list(refs.values()) for n, refs in net_to_refs.items()}, meta
 
 
+def parse_bvraw_format_3(path: str) -> Tuple[set[str], Dict[str, List[Dict[str, Any]]], Dict[str, Any]]:
+    with open(path, "r", encoding="utf-8", errors="ignore") as f:
+        text = f.read()
+    return parse_bvraw_format_3_text(text)
+
+
 def parse_boardview(path: str) -> Tuple[set[str], Dict[str, List[Dict[str, Any]]], Dict[str, Any]]:
     with open(path, "rb") as f:
         data = f.read()
@@ -214,6 +228,15 @@ def parse_boardview(path: str) -> Tuple[set[str], Dict[str, List[Dict[str, Any]]
         raise ValueError("unsupported_boardview_format")
     if fmt == "BVRAW_FORMAT_3":
         return parse_bvraw_format_3(path)
+    if fmt == "PCB_EMBEDDED_ZLIB":
+        from ..pcb_boardview import parse_pcb_zlib_container
+        return parse_pcb_zlib_container(path)
+    if fmt == "BRD":
+        from .brd_parser import parse_brd
+        return parse_brd(path)
+    if fmt == "XZZPCB":
+        from .xzzpcb_parser import parse_xzzpcb
+        return parse_xzzpcb(path)
 
     strings = _extract_ascii_strings(data)
     if not strings:

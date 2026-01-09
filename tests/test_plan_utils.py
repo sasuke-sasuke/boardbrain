@@ -61,6 +61,35 @@ REQUESTED MEASUREMENTS
     assert meta["parse_failed"] is True
 
 
+def test_normalize_requested_items_check_prefix():
+    items = [
+        {
+            "key": "CHECK_PP3V3_S2",
+            "net": "CHECK_PP3V3_S2",
+            "type": "voltage",
+            "prompt": "Measure PP3V3_S2",
+        }
+    ]
+    from boardbrain.plan_utils import normalize_requested_items
+    cleaned, err = normalize_requested_items(items, known_nets={"PP3V3_S2"})
+    assert err == ""
+    assert cleaned[0]["meta"]["net"] == "PP3V3_S2"
+
+
+def test_normalize_requested_items_net_from_key():
+    items = [
+        {
+            "key": "CHECK_PP1V8_ALWAYS",
+            "type": "voltage",
+            "prompt": "Measure PP1V8_ALWAYS",
+        }
+    ]
+    from boardbrain.plan_utils import normalize_requested_items
+    cleaned, err = normalize_requested_items(items, known_nets={"PP1V8_ALWAYS"})
+    assert err == ""
+    assert cleaned[0]["meta"]["net"] == "PP1V8_ALWAYS"
+
+
 def test_parse_requested_measurements_json_block():
     text = "STEPS"
     items, meta = parse_requested_measurements(text, known_nets={"PPBUS_AON"})

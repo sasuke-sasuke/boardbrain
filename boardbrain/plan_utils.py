@@ -154,7 +154,16 @@ def normalize_requested_items(
         if any(k not in allowed for k in item.keys()):
             return [], "json_item_extra_keys"
         key = (item.get("key") or "").strip()
-        net = canonicalize_net_name(item.get("net") or "")
+        net_raw = (item.get("net") or "").strip()
+        if not net_raw and key:
+            _, base, _ = split_req_key(key)
+            net_raw = base
+        net_raw_u = net_raw.upper()
+        for p in ("CHECK_", "VERIFY_", "MEASURE_", "READ_"):
+            if net_raw_u.startswith(p):
+                net_raw = net_raw[len(p):]
+                break
+        net = canonicalize_net_name(net_raw or "")
         mtype = (item.get("type") or "").strip().lower()
         prompt = (item.get("prompt") or "").strip()
         hint = (item.get("hint") or "").strip()

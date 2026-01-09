@@ -184,6 +184,15 @@ def _build_debug_report(
     guardrail_report: dict | None,
     test_points: list[str] | None,
 ) -> str:
+    def _dedupe_paths(paths: list[str]) -> list[str]:
+        seen = set()
+        out = []
+        for p in paths:
+            if p in seen:
+                continue
+            seen.add(p)
+            out.append(p)
+        return out
     lines = []
     lines.append("BoardBrain Debug Report")
     lines.append("")
@@ -194,7 +203,7 @@ def _build_debug_report(
     lines.append("")
     lines.append("KB Paths")
     lines.append(f"- kb_raw_dir: {SETTINGS.kb_raw_dir}")
-    kb_paths = net_meta.get("kb_paths") or []
+    kb_paths = _dedupe_paths(net_meta.get("kb_paths") or [])
     if kb_paths:
         for p in kb_paths:
             lines.append(f"- {p}")
@@ -610,7 +619,7 @@ else:
 with st.sidebar.expander("Debug / Netlist / Plan State", expanded=False):
     st.write(f"Case: {case.get('case_id','')}")
     st.write(f"Model: {case.get('model','')} | Board: {case.get('board_id','')}")
-    kb_paths = net_meta.get("kb_paths") or []
+    kb_paths = list(dict.fromkeys(net_meta.get("kb_paths") or []))
     st.write("KB paths:")
     st.write(f"KB_RAW_DIR: {SETTINGS.kb_raw_dir}")
     if kb_paths:
@@ -900,9 +909,15 @@ def _run_plan_update(
     if items_json:
         known_refdes = st.session_state.get("known_components", set())
         items, err = normalize_requested_items(items_json, known_nets=known_nets, known_refdes=known_refdes)
+        if err == "json_item_unknown_net":
+            items, err = normalize_requested_items(items_json, known_nets=None, known_refdes=known_refdes)
         if err:
-            parse_meta = {"parse_failed": True, "parse_error": err}
-            items = []
+            items, err2 = normalize_requested_items(items_json, known_nets=None, known_refdes=None)
+            if err2:
+                parse_meta = {"parse_failed": True, "parse_error": err}
+                items = []
+            else:
+                parse_meta = {"parse_failed": False, "parse_error": ""}
     else:
         items, parse_meta = parse_requested_measurements(plan_text_display, known_nets=known_nets)
         if items:

@@ -58,13 +58,16 @@ def _infer_board_id(case: Dict[str, Any]) -> str:
     b = (case.get("board_id") or "").strip()
     if b:
         return b
-    m = re.search(r"\b\d{3}-\d{5}\b", case.get("case_id", ""))
+    case_id = (case.get("case_id") or "").strip()
+    m = re.search(r"\b\d{3}-\d{5}(?:_\d{3}-\d{5})?\b", case_id)
     return m.group(0) if m else ""
 
 
 def _infer_model(case: Dict[str, Any]) -> str:
-    m = re.search(r"\bA\d{4}\b", (case.get("model") or "") + " " + case.get("case_id", ""), re.IGNORECASE)
-    return m.group(0).upper() if m else (case.get("model") or "")
+    model = (case.get("model") or "").strip()
+    case_id = (case.get("case_id") or "").strip()
+    m = re.search(r"\bA\d{4}\b", f"{model} {case_id}", re.IGNORECASE)
+    return m.group(0).upper() if m else model
 
 
 def _extract_nets_from_text(text: str) -> Set[str]:
@@ -197,6 +200,8 @@ def _get_kb_paths(board_id: str, model: str) -> List[str]:
     matches = []
     if not os.path.isdir(kb_root):
         return matches
+    board_id = (board_id or "").strip()
+    model = (model or "").strip()
     for root, dirs, _ in os.walk(kb_root):
         path = root.replace("\\", "/")
         if board_id and board_id in path:
@@ -208,13 +213,44 @@ def _get_kb_paths(board_id: str, model: str) -> List[str]:
 
 def _expected_kb_paths(case: Dict[str, Any], board_id: str, model: str) -> List[str]:
     family = (case.get("device_family") or "MacBook").strip()
+    board_id = (board_id or "").strip()
+    model = (model or "").strip()
+    paths: List[str] = []
+    fam_l = family.lower()
+    if fam_l.startswith("iphone"):
+        base = os.path.join(SETTINGS.kb_raw_dir, "iPhone")
+        if board_id:
+            matches = []
+            for root, dirs, _ in os.walk(base):
+                path = root.replace("\\", "/")
+                if board_id in path:
+                    matches.append(root)
+            if matches:
+                for m in sorted(set(matches), key=len):
+                    paths.append(m)
+                    for entry in os.listdir(m):
+                        full = os.path.join(m, entry)
+                        if os.path.isdir(full):
+                            paths.append(full)
+                return paths
+        if model:
+            parts = [SETTINGS.kb_raw_dir, "iPhone", model]
+            if board_id:
+                parts.append(board_id)
+            base = os.path.join(*parts)
+            if os.path.isdir(base):
+                paths.append(base)
+                for entry in os.listdir(base):
+                    full = os.path.join(base, entry)
+                    if os.path.isdir(full):
+                        paths.append(full)
+            return paths
     parts = [SETTINGS.kb_raw_dir, family]
     if model:
         parts.append(model)
     if board_id:
         parts.append(board_id)
     base = os.path.join(*parts)
-    paths = []
     if os.path.isdir(base):
         paths.append(base)
         for entry in os.listdir(base):
@@ -226,6 +262,27 @@ def _expected_kb_paths(case: Dict[str, Any], board_id: str, model: str) -> List[
 
 def _extract_from_kb_text(paths: List[str]) -> Tuple[Set[str], Dict[str, int]]:
     counts: Dict[str, int] = {}
+    def _suppress_stderr():
+        import contextlib
+        import os
+        @contextlib.contextmanager
+        def _ctx():
+            fd = None
+            try:
+                fd = os.dup(2)
+                with open(os.devnull, "w") as devnull:
+                    os.dup2(devnull.fileno(), 2)
+                    yield
+            except Exception:
+                yield
+            finally:
+                try:
+                    if fd is not None:
+                        os.dup2(fd, 2)
+                        os.close(fd)
+                except Exception:
+                    pass
+        return _ctx()
     for root in paths:
         for dirpath, _, files in os.walk(root):
             for fn in files:
@@ -241,16 +298,35 @@ def _extract_from_kb_text(paths: List[str]) -> Tuple[Set[str], Dict[str, int]]:
                         continue
                 elif ext == ".pdf":
                     try:
+                        with open(full, "rb") as f:
+                            header = f.read(5)
+                        if header != b"%PDF-":
+                            print(f"[pdf] skipped {full} reason=header_mismatch")
+                            continue
                         import fitz
-                        doc = fitz.open(full)
+                        try:
+                            fitz.TOOLS.set_verbosity(0)
+                        except Exception:
+                            pass
+                        from contextlib import redirect_stderr
+                        import io
+                        err_buf = io.StringIO()
+                        with _suppress_stderr():
+                            with redirect_stderr(err_buf):
+                                doc = fitz.open(full)
                         for i in range(len(doc)):
-                            text = (doc[i].get_text("text") or "").strip()
+                            try:
+                                with _suppress_stderr():
+                                    text = (doc[i].get_text("text") or "").strip()
+                            except Exception:
+                                continue
                             if text:
                                 chunk_counts = _extract_net_counts_from_text(text)
                                 for k, v in chunk_counts.items():
                                     counts[k] = counts.get(k, 0) + v
                         doc.close()
-                    except Exception:
+                    except Exception as e:
+                        print(f"[pdf] skipped {full} reason={e}")
                         continue
     nets, filtered = _filter_net_counts(counts)
     return nets, filtered
@@ -347,10 +423,14 @@ def load_netlist(board_id: str = "", model: str = "", case: Optional[Dict[str, A
     meta: Dict[str, Any] = {}
     nets_cached, meta_cached = _load_cached_netlist(cache_path)
     cache_source = (meta_cached.get("source") or "").lower()
-    if report_status == "success":
+    if report_status == "unsupported_format":
+        nets, meta = set(), {}
+        meta["source"] = "boardview_unsupported"
+        meta["source_reason"] = "boardview_unsupported"
+    elif report_status in ("success", "partial_success"):
         nets, meta = nets_cached, meta_cached
         if nets:
-            meta["source_reason"] = "boardview_success"
+            meta["source_reason"] = "boardview_partial" if report_status == "partial_success" else "boardview_success"
         else:
             meta = {}
     elif report_status == "fail":
@@ -358,29 +438,52 @@ def load_netlist(board_id: str = "", model: str = "", case: Optional[Dict[str, A
     elif cache_source.startswith("boardview_"):
         nets, meta = nets_cached, meta_cached
         meta["source_reason"] = "boardview_cache_no_report"
+    skip_fallback = False
     if not nets:
         if report_status == "fail":
-            source_reason = "boardview_parse_failed_fallback"
-        elif report_status == "success":
+            if report_error == "xzzpcb_missing_or_invalid_key":
+                source_reason = "boardview_key_missing"
+                meta = {
+                    "source": "boardview_key_missing",
+                    "source_reason": source_reason,
+                    "board_id": board_id,
+                    "model": model,
+                }
+                nets = set()
+                skip_fallback = True
+            else:
+                source_reason = "boardview_parse_failed_fallback"
+        elif report_status == "unsupported_format":
+            source_reason = "boardview_unsupported"
+            meta = {
+                "source": "boardview_unsupported",
+                "source_reason": source_reason,
+                "board_id": board_id,
+                "model": model,
+            }
+            nets = set()
+            skip_fallback = True
+        elif report_status in ("success", "partial_success"):
             source_reason = "boardview_success_missing_netlist_fallback"
         elif report:
             source_reason = "boardview_missing_fallback"
         else:
             source_reason = "boardview_missing"
-        if case:
-            kb_paths = _expected_kb_paths(case, board_id, model)
-        else:
-            kb_paths = _get_kb_paths(board_id, model)
-        nets, counts = _extract_from_kb_text(kb_paths)
-        meta = {
-            "source": "kb_text",
-            "source_reason": source_reason,
-            "board_id": board_id,
-            "model": model,
-            "counts": counts,
-        }
-        if nets and source_reason != "boardview_parse_failed_fallback":
-            _save_cached_netlist(cache_path, nets, meta)
+        if not skip_fallback:
+            if case:
+                kb_paths = _expected_kb_paths(case, board_id, model)
+            else:
+                kb_paths = _get_kb_paths(board_id, model)
+            nets, counts = _extract_from_kb_text(kb_paths)
+            meta = {
+                "source": "kb_text",
+                "source_reason": source_reason,
+                "board_id": board_id,
+                "model": model,
+                "counts": counts,
+            }
+            if nets and source_reason != "boardview_parse_failed_fallback":
+                _save_cached_netlist(cache_path, nets, meta)
     meta.setdefault("cache_path", cache_path)
     meta.setdefault("board_id", board_id)
     meta.setdefault("model", model)
@@ -460,6 +563,8 @@ def extract_net_tokens(text: str) -> List[str]:
         token = m.group(0)
         canon = canonicalize_net_name(token)
         if not canon:
+            continue
+        if canon.startswith(("CHECK_", "VERIFY_", "MEASURE_", "READ_")):
             continue
         if canon.startswith("PP"):
             out.append(token)
@@ -605,6 +710,11 @@ def enforce_net_guardrail(
         key_u = key.upper()
         meta = dict(item.get("meta") or {})
         target = item.get("net") or meta.get("net")
+        if isinstance(target, str) and target.upper().startswith(("CHECK_", "VERIFY_", "MEASURE_", "READ_")):
+            for p in ("CHECK_", "VERIFY_", "MEASURE_", "READ_"):
+                if target.upper().startswith(p):
+                    target = target[len(p):]
+                    break
         prefix, net_part, suffix = split_measurement_key(key_u)
         base = key_u
         if suffix and base.endswith(suffix):

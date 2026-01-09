@@ -58,13 +58,16 @@ def _infer_board_id(case: Dict[str, Any]) -> str:
     b = (case.get("board_id") or "").strip()
     if b:
         return b
-    m = re.search(r"\b\d{3}-\d{5}\b", case.get("case_id", ""))
+    case_id = (case.get("case_id") or "").strip()
+    m = re.search(r"\b\d{3}-\d{5}(?:_\d{3}-\d{5})?\b", case_id)
     return m.group(0) if m else ""
 
 
 def _infer_model(case: Dict[str, Any]) -> str:
-    m = re.search(r"\bA\d{4}\b", case.get("model", "") + " " + case.get("case_id", ""))
-    return m.group(0) if m else (case.get("model") or "")
+    model = (case.get("model") or "").strip()
+    case_id = (case.get("case_id") or "").strip()
+    m = re.search(r"\bA\d{4}\b", f"{model} {case_id}")
+    return m.group(0) if m else model
 
 
 def _build_baseline_context(model: str, board_id: str) -> str:
