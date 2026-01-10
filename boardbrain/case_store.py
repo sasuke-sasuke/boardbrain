@@ -108,6 +108,19 @@ CREATE TABLE IF NOT EXISTS requested_measurements (
     resolved_at TEXT NULL,
     meta_json TEXT NULL
 );
+
+CREATE TABLE IF NOT EXISTS expected_ranges (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    board_id TEXT NOT NULL,
+    net TEXT NOT NULL,
+    measurement_type TEXT NOT NULL,
+    expected_min TEXT,
+    expected_max TEXT,
+    unit TEXT,
+    source TEXT NOT NULL,
+    note TEXT,
+    created_at TEXT NOT NULL
+);
 """
 
 
@@ -127,6 +140,7 @@ def init_db() -> None:
         c.executescript(SCHEMA_SQL)
         # Lightweight migrations for older DBs
         _ensure_column(c, "cases", "board_id", "ALTER TABLE cases ADD COLUMN board_id TEXT")
+        _ensure_column(c, "expected_ranges", "note", "ALTER TABLE expected_ranges ADD COLUMN note TEXT")
 
 def get_case_dir(case_id: str) -> str:
     return os.path.join(SETTINGS.data_dir, "cases", case_id)
@@ -519,3 +533,81 @@ def list_requested_measurements(case_id: str) -> List[Dict[str, Any]]:
             }
         )
     return out
+
+
+def add_expected_range(
+    board_id: str,
+    net: str,
+    measurement_type: str,
+    expected_min: str,
+    expected_max: str,
+    unit: str,
+    source: str,
+    note: str = "",
+) -> None:
+    import datetime
+    init_db()
+    with _conn() as c:
+        c.execute(
+            "INSERT INTO expected_ranges(board_id,net,measurement_type,expected_min,expected_max,unit,source,note,created_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?)",
+            (
+                board_id,
+                net,
+                measurement_type,
+                expected_min,
+                expected_max,
+                unit,
+                source,
+                note,
+                datetime.datetime.utcnow().isoformat(),
+            ),
+        )
+
+
+def list_expected_ranges(board_id: str) -> List[Dict[str, Any]]:
+    init_db()
+    with _conn() as c:
+        rows = c.execute(
+            "SELECT id,net,measurement_type,expected_min,expected_max,unit,source,note,created_at "
+            "FROM expected_ranges WHERE board_id=? ORDER BY created_at DESC",
+            (board_id,),
+        ).fetchall()
+    return [
+        {
+            "id": r[0],
+            "net": r[1],
+            "measurement_type": r[2],
+            "expected_min": r[3],
+            "expected_max": r[4],
+            "unit": r[5],
+            "source": r[6],
+            "note": r[7] or "",
+            "created_at": r[8],
+        }
+        for r in rows
+    ]
+
+
+def update_expected_range(
+    range_id: int,
+    net: str,
+    measurement_type: str,
+    expected_min: str,
+    expected_max: str,
+    unit: str,
+    source: str,
+    note: str = "",
+) -> None:
+    init_db()
+    with _conn() as c:
+        c.execute(
+            "UPDATE expected_ranges SET net=?,measurement_type=?,expected_min=?,expected_max=?,unit=?,source=?,note=? WHERE id=?",
+            (net, measurement_type, expected_min, expected_max, unit, source, note, range_id),
+        )
+
+
+def delete_expected_range(range_id: int) -> None:
+    init_db()
+    with _conn() as c:
+        c.execute("DELETE FROM expected_ranges WHERE id=?", (range_id,))

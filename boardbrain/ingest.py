@@ -33,6 +33,17 @@ def infer_doc_type(path: str) -> str:
         return "log"
     return "note"
 
+def infer_evidence_source(path: str) -> str:
+    p = path.lower()
+    if any(tok in p for tok in ("community", "reddit", "forum", "stackexchange", "stack overflow", "youtube", "discord")):
+        return "community"
+    doc_type = infer_doc_type(path)
+    if doc_type in ("schematic", "datasheet", "manual"):
+        return "schematic"
+    if doc_type == "boardview":
+        return "boardview"
+    return "note"
+
 
 _RE_BOARD_ID = re.compile(r"\b\d{3}-\d{5}(?:_\d{3}-\d{5})?\b")
 _RE_MODEL = re.compile(r"\bA\d{4}\b", re.IGNORECASE)
@@ -128,6 +139,7 @@ def ingest_pdf(path: str) -> List[Tuple[str, Dict[str, Any]]]:
                 "page": i + 1,
                 "chunk": j,
                 "doc_type": infer_doc_type(path),
+                "evidence_source": infer_evidence_source(path),
                 "board_id": infer_board_id(path),
                 "model": infer_model(path),
                 "device_family": infer_device_family(path),
@@ -150,6 +162,7 @@ def ingest_text_file(path: str) -> List[Tuple[str, Dict[str, Any]]]:
             "page": None,
             "chunk": j,
             "doc_type": infer_doc_type(path),
+            "evidence_source": infer_evidence_source(path),
             "board_id": infer_board_id(path),
             "model": infer_model(path),
             "device_family": infer_device_family(path),

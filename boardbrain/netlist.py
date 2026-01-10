@@ -530,6 +530,15 @@ def suggest_nets(board_id: str, net_name: str, k: int = 5, case: Optional[Dict[s
 
 def choose_primary_power_rail(board_id: str, case: Optional[Dict[str, Any]] = None) -> Optional[str]:
     nets, _ = load_netlist(board_id=board_id, case=case)
+    device_family = (case.get("device_family") if case else "") or ""
+    model = (case.get("model") if case else "") or ""
+    if not device_family and model.lower().startswith("iphone"):
+        device_family = "iPhone"
+    if device_family.lower() == "iphone":
+        for cand in ("PP_VDD_MAIN", "PPVDD_MAIN", "PP_BATT", "PPBATT", "PPVBAT", "PP_VBAT", "PPVBUS", "VBUS"):
+            matches = [n for n in nets if n.startswith(cand)]
+            if matches:
+                return sorted(matches)[0]
     if "PPBUS_AON" in nets:
         return "PPBUS_AON"
     g3h = [n for n in nets if n.startswith("PPBUS_G3H")]

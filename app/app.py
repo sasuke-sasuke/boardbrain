@@ -29,6 +29,7 @@ from boardbrain.case_store import (
     add_plan_version, get_latest_plan, list_plan_versions,
     set_requested_measurements, mark_requested_measurement_done, list_requested_measurements,
     get_case_delete_summary,
+    add_expected_range, list_expected_ranges, update_expected_range, delete_expected_range,
 )
 from boardbrain.diagnose import answer_question, generate_plan, extract_requested_measurements_json
 from boardbrain.chat_commands import parse_command
@@ -950,6 +951,12 @@ def _run_plan_update(
         plan_items=items,
         case=case,
     )
+    if items:
+        invalid_items = [it for it in items if (it.get("meta") or {}).get("net_valid") is False or it.get("net") == "[UNKNOWN_NET]"]
+        if invalid_items:
+            st.session_state["requested_measurements_parse_failed"] = True
+            st.session_state["requested_measurements_parse_error"] = "invalid_plan_item_net"
+            items = st.session_state.get("plan_state", {}).get("requested_measurements", [])
     plan_text_display = _strip_cheat_sheet(plan_text_display)
     comp_guarded_text, comp_report = enforce_component_guardrail(
         plan_text_display,
@@ -1432,6 +1439,200 @@ with left:
                 st.write(f"- **{a['type']}**: {a['filename']}")
         else:
             st.warning("No attachments yet.")
+
+    with st.expander("Expected Ranges (manual entry)", expanded=False):
+        board_id = case.get("board_id", "")
+        known_nets = st.session_state.get("known_nets", set())
+        st.caption("Add per-board expected ranges from known-good measurements. These are used as truth for diagnostics.")
+        er_net = st.text_input("Net", value="")
+        er_type = st.selectbox(
+            "Measurement type",
+            ["voltage", "resistance", "diode", "current", "frequency", "continuity"],
+            index=0,
+        )
+        er_value = st.text_input("Measured value", value="")
+        er_unit = st.text_input("Unit", value="V")
+        er_source = st.selectbox(
+            "Source",
+            ["known-good-board", "case_history", "schematic", "boardview", "community"],
+            index=0,
+        )
+        er_note = st.text_input("Note (optional)", value="known-good iCloud-locked board")
+        if st.button("Add expected range"):
+            canon = canonicalize_net_name(er_net)
+            if not canon:
+                st.warning("Enter a valid net name.")
+            elif known_nets and canon not in known_nets:
+                st.warning("Net not found in current boardview netlist.")
+            elif not board_id:
+                st.warning("Board ID missing for this case.")
+            else:
+                add_expected_range(
+                    board_id=board_id,
+                    net=canon,
+                    measurement_type=er_type,
+                    expected_min=er_value,
+                    expected_max=er_value,
+                    unit=er_unit,
+                    source=er_source,
+                    note=er_note,
+                )
+                st.success("Expected range saved.")
+                _rerun()
+        st.divider()
+        st.subheader("Bulk entry")
+        st.caption("Format: NET, type, value, unit, note (one per line). Type optional.")
+        bulk_text = st.text_area("Bulk lines", value="", height=120)
+        if st.button("Import bulk lines"):
+            if not board_id:
+                st.warning("Board ID missing for this case.")
+            else:
+                added = 0
+                lines = [l.strip() for l in bulk_text.splitlines() if l.strip()]
+                for line in lines:
+                    parts = [p.strip() for p in line.split(",")]
+                    if len(parts) >= 3:
+                        net_raw = parts[0]
+                        mtype = parts[1] or "voltage"
+                        value = parts[2]
+                        unit = parts[3] if len(parts) > 3 else ""
+                        note = parts[4] if len(parts) > 4 else ""
+                    else:
+                        tokens = line.split()
+                        if len(tokens) < 2:
+                            continue
+                        net_raw = tokens[0]
+                        value = tokens[1]
+                        unit = tokens[2] if len(tokens) > 2 else ""
+                        mtype = tokens[3] if len(tokens) > 3 else "voltage"
+                        note = " ".join(tokens[4:]) if len(tokens) > 4 else ""
+                    canon = canonicalize_net_name(net_raw)
+                    if not canon:
+                        continue
+                    if known_nets and canon not in known_nets:
+                        continue
+                    add_expected_range(
+                        board_id=board_id,
+                        net=canon,
+                        measurement_type=mtype,
+                        expected_min=value,
+                        expected_max=value,
+                        unit=unit,
+                        source="known-good-board",
+                        note=note,
+                    )
+                    added += 1
+                st.success(f"Imported {added} entries.")
+                _rerun()
+        st.divider()
+        st.subheader("Import from baseline measurements")
+        st.caption("Copy known-good baseline measurements into expected ranges for this board.")
+        if st.button("Import baseline measurements"):
+            if not board_id:
+                st.warning("Board ID missing for this case.")
+            else:
+                existing = list_expected_ranges(board_id)
+                seen = {(r["net"], r["measurement_type"], r.get("expected_min"), r.get("expected_max"), r.get("unit"), r.get("source")) for r in existing}
+                added = 0
+                for b in list_baselines():
+                    if b.get("board_id") != board_id:
+                        continue
+                    for m in list_baseline_measurements(b["baseline_id"]):
+                        tokens = extract_net_tokens(m.get("name") or "")
+                        if not tokens:
+                            continue
+                        net = canonicalize_net_name(tokens[0])
+                        if not net:
+                            continue
+                        name_l = f"{m.get('name','')} {m.get('note','')}".lower()
+                        mtype = "voltage"
+                        if "diode" in name_l:
+                            mtype = "diode"
+                        elif "ohm" in name_l or "resistance" in name_l or "r2g" in name_l:
+                            mtype = "resistance"
+                        elif "amp" in name_l or "current" in name_l:
+                            mtype = "current"
+                        elif "hz" in name_l or "freq" in name_l:
+                            mtype = "frequency"
+                        unit = m.get("unit") or ""
+                        value = m.get("value") or ""
+                        key = (net, mtype, value, value, unit, "baseline")
+                        if key in seen:
+                            continue
+                        add_expected_range(
+                            board_id=board_id,
+                            net=net,
+                            measurement_type=mtype,
+                            expected_min=value,
+                            expected_max=value,
+                            unit=unit,
+                            source="baseline",
+                            note=m.get("note") or "",
+                        )
+                        seen.add(key)
+                        added += 1
+                st.success(f"Imported {added} baseline measurements.")
+                _rerun()
+        existing = list_expected_ranges(board_id) if board_id else []
+        if existing:
+            st.write("Latest expected ranges:")
+            for r in existing[:30]:
+                unit = f" {r.get('unit','')}".strip()
+                if r.get("expected_min") == r.get("expected_max"):
+                    exp = f"{r.get('expected_min','')}{unit}"
+                else:
+                    exp = f"{r.get('expected_min','')}–{r.get('expected_max','')}{unit}"
+                st.write(f"- #{r['id']} {r['net']} | {r['measurement_type']} | {exp} | source={r.get('source')}")
+            st.divider()
+            st.subheader("Edit / Delete expected range")
+            options = {f"#{r['id']} {r['net']} {r['measurement_type']}": r for r in existing}
+            sel = st.selectbox("Select range", list(options.keys()))
+            r = options[sel]
+            er_net_e = st.text_input("Net (edit)", value=r["net"], key="er_edit_net")
+            er_type_e = st.selectbox(
+                "Measurement type (edit)",
+                ["voltage", "resistance", "diode", "current", "frequency", "continuity"],
+                index=["voltage", "resistance", "diode", "current", "frequency", "continuity"].index(r["measurement_type"])
+                if r["measurement_type"] in ["voltage", "resistance", "diode", "current", "frequency", "continuity"] else 0,
+                key="er_edit_type",
+            )
+            er_min_e = st.text_input("Expected min (edit)", value=r.get("expected_min", ""), key="er_edit_min")
+            er_max_e = st.text_input("Expected max (edit)", value=r.get("expected_max", ""), key="er_edit_max")
+            er_unit_e = st.text_input("Unit (edit)", value=r.get("unit", ""), key="er_edit_unit")
+            er_source_e = st.selectbox(
+                "Source (edit)",
+                ["known-good-board", "baseline", "case_history", "schematic", "boardview", "community"],
+                index=["known-good-board", "baseline", "case_history", "schematic", "boardview", "community"].index(r.get("source", "known-good-board"))
+                if r.get("source") in ["known-good-board", "baseline", "case_history", "schematic", "boardview", "community"] else 0,
+                key="er_edit_source",
+            )
+            er_note_e = st.text_input("Note (edit)", value=r.get("note", ""), key="er_edit_note")
+            c1, c2 = st.columns([1, 1])
+            with c1:
+                if st.button("Save changes"):
+                    canon = canonicalize_net_name(er_net_e)
+                    if not canon:
+                        st.warning("Enter a valid net name.")
+                    elif known_nets and canon not in known_nets:
+                        st.warning("Net not found in current boardview netlist.")
+                    else:
+                        update_expected_range(
+                            range_id=r["id"],
+                            net=canon,
+                            measurement_type=er_type_e,
+                            expected_min=er_min_e,
+                            expected_max=er_max_e,
+                            unit=er_unit_e,
+                            source=er_source_e,
+                            note=er_note_e,
+                        )
+                        st.success("Expected range updated.")
+                        _rerun()
+            with c2:
+                if st.button("Delete range"):
+                    delete_expected_range(r["id"])
+                    st.success("Expected range deleted.")
+                    _rerun()
 
 with right:
     st.subheader("Current Plan")

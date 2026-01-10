@@ -16,6 +16,7 @@ XZZ_GLOBAL_SCALE = 10000
 XZZ_MAGIC = b"XZZPCB"
 XZZ_MARKER = b"v6v6555v6v6"
 XZZ_MASTER_KEY = 0xDCFC12AC00000000
+_REFDES_RE = re.compile(r"^(?:TP[0-9A-Z]+|FB\\d{1,5}|[A-Z]{1,3}\\d{1,5})(?:_[0-9]+)?$", re.IGNORECASE)
 
 
 def _read_u32(buf: bytes, pos: int) -> int:
@@ -86,23 +87,17 @@ def _des_decrypt_bytes(data: bytes, key: int) -> bytes:
             block = data[i : i + 8]
             if len(block) < 8:
                 block = block.ljust(8, b"\x00")
-            block = block[::-1]
             dec = cipher.decrypt(block)
-            out[i : i + 8] = dec[::-1]
+            out[i : i + 8] = dec
         return bytes(out)
     out = bytearray(len(data))
     for i in range(0, len(data), 8):
         block = data[i : i + 8]
         if len(block) < 8:
             block = block.ljust(8, b"\x00")
-        # reverse byte order into uint64
-        val = 0
-        for j in range(8):
-            val |= block[7 - j] << (j * 8)
+        val = int.from_bytes(block, "big", signed=False)
         dec = des_decrypt_block(val, key)
-        # back to bytes reversed
-        for j in range(8):
-            out[i + j] = (dec >> (j * 8)) & 0xFF
+        out[i : i + 8] = dec.to_bytes(8, "big", signed=False)
     return bytes(out)
 
 
@@ -289,15 +284,37 @@ def parse_xzzpcb(path: str) -> Tuple[set, Dict[str, List[Dict[str, Any]]], Dict[
             net_name = net_dict.get(net_index, "")
             if net_name in ("UNCONNECTED", "NC"):
                 net_name = ""
+            tp_name = name
+            if tp_name and not tp_name[0].isalpha():
+                tp_name = f"TP{tp_name}"
             testpads.append(
                 {
-                    "name": name,
+                    "name": tp_name,
                     "x": x_origin // XZZ_GLOBAL_SCALE,
                     "y": y_origin // XZZ_GLOBAL_SCALE,
                     "net": net_name,
                     "side": "top",
                 }
             )
+            parts.append(
+                {
+                    "name": f"...{tp_name}",
+                    "side": "top",
+                    "type": "TP",
+                    "end_of_pins": 0,
+                }
+            )
+            pins.append(
+                {
+                    "x": x_origin // XZZ_GLOBAL_SCALE,
+                    "y": y_origin // XZZ_GLOBAL_SCALE,
+                    "name": tp_name,
+                    "part": len(parts),
+                    "net": net_name,
+                    "side": "top",
+                }
+            )
+            parts[-1]["end_of_pins"] = len(pins)
 
     dx, dy = _find_translation(outline_segments)
     if dx or dy:
@@ -309,7 +326,7 @@ def parse_xzzpcb(path: str) -> Tuple[set, Dict[str, List[Dict[str, Any]]], Dict[
             t["x"] -= dx
             t["y"] -= dy
 
-    nets: set = set()
+    nets: set = set(canonicalize_net_name(n) for n in net_dict.values() if canonicalize_net_name(n))
     net_to_refs: Dict[str, Dict[str, Dict[str, Any]]] = {}
     part_points: Dict[int, List[Tuple[int, int]]] = {}
     for pin in pins:
@@ -331,11 +348,23 @@ def parse_xzzpcb(path: str) -> Tuple[set, Dict[str, List[Dict[str, Any]]], Dict[
         net_to_refs[net].setdefault(refdes, {"refdes": refdes, "kind": kind, "side": "top"})
 
     net_to_refs_dict = {n: list(refs.values()) for n, refs in net_to_refs.items()}
-    components: List[str] = [p["name"] for p in parts if p.get("name") and p.get("name") != "..."]
+    components: List[str] = []
+    for p in parts:
+        name = p.get("name") or ""
+        if not name or name == "...":
+            continue
+        if name.startswith("..."):
+            name = name.lstrip(".")
+        if _REFDES_RE.match(name):
+            components.append(name)
     component_details: List[Dict[str, Any]] = []
     for idx, part in enumerate(parts):
         name = part.get("name") or ""
         if not name or name == "...":
+            continue
+        if name.startswith("..."):
+            name = name.lstrip(".")
+        if not _REFDES_RE.match(name):
             continue
         pts = part_points.get(idx, [])
         if pts:
@@ -365,5 +394,8 @@ def parse_xzzpcb(path: str) -> Tuple[set, Dict[str, List[Dict[str, Any]]], Dict[
         "component_details": component_details,
         "key_source": key_source,
     }
+    if not pins or not components:
+        meta["parse_status"] = "partial_success"
+        meta["parse_error"] = "xzzpcb_missing_parts_or_pins"
     meta["components"] = components
     return nets, net_to_refs_dict, meta

@@ -6,7 +6,8 @@ import json
 from .config import SETTINGS
 from .case_store import (
     list_measurements, list_notes, list_attachments,
-    list_baselines, list_baseline_measurements
+    list_baselines, list_baseline_measurements,
+    list_expected_ranges
 )
 from .guardrails import (
     is_board_specific_question, has_required_evidence, refusal_message_missing_evidence
@@ -14,8 +15,12 @@ from .guardrails import (
 from .oai import embed_text, run_reasoning_with_vision
 from .rag import query as rag_query
 from .prompts import SYSTEM_PROMPT
-from .netlist import load_netlist, choose_primary_power_rail, extract_net_tokens, canonicalize_net_name, suggest_nets
+from .netlist import load_netlist, choose_primary_power_rail, extract_net_tokens, canonicalize_net_name, suggest_nets, _expected_kb_paths
 from .net_refs import get_measure_points, measurement_points_for_net
+try:
+    import fitz  # PyMuPDF
+except Exception:
+    fitz = None
 
 def _load_attachment_bytes(rel_path: str) -> Tuple[bytes, str]:
     abs_path = os.path.join(SETTINGS.data_dir, rel_path)
@@ -29,6 +34,131 @@ def _load_attachment_bytes(rel_path: str) -> Tuple[bytes, str]:
         mime = "image/gif"
     with open(abs_path, "rb") as f:
         return f.read(), mime
+
+
+def _load_kb_boardview_images(case: Dict[str, Any], board_id: str, model: str, limit: int = 24) -> List[Dict[str, Any]]:
+    kb_paths = _expected_kb_paths(case, board_id, model)
+    if not kb_paths:
+        return []
+    try:
+        limit = int(os.getenv("BOARDVIEW_SCREENS_MAX_IMAGES", str(limit)))
+    except Exception:
+        pass
+    images: List[Dict[str, Any]] = []
+    bv_dirs = [p for p in kb_paths if os.path.basename(p).lower() == "boardview_screens"]
+    if not bv_dirs:
+        return []
+    cache_root = os.path.join(SETTINGS.data_dir, "boardview_screens_cache", board_id or "unknown")
+    os.makedirs(cache_root, exist_ok=True)
+
+    def _read_image_bytes(path: str) -> Tuple[bytes, str] | None:
+        ext = os.path.splitext(path)[1].lower()
+        if ext in (".jpg", ".jpeg"):
+            mime = "image/jpeg"
+        elif ext == ".webp":
+            mime = "image/webp"
+        elif ext == ".gif":
+            mime = "image/gif"
+        else:
+            mime = "image/png"
+        try:
+            with open(path, "rb") as f:
+                return f.read(), mime
+        except Exception:
+            return None
+
+    def _pdf_to_images(pdf_path: str, page_limit: int = 20) -> List[str]:
+        if fitz is None:
+            return []
+        try:
+            page_limit = int(os.getenv("BOARDVIEW_SCREENS_MAX_PAGES", str(page_limit)))
+        except Exception:
+            pass
+        def _suppress_stderr():
+            import contextlib
+            import os
+            @contextlib.contextmanager
+            def _ctx():
+                fd = None
+                try:
+                    fd = os.dup(2)
+                    with open(os.devnull, "w") as devnull:
+                        os.dup2(devnull.fileno(), 2)
+                        yield
+                except Exception:
+                    yield
+                finally:
+                    try:
+                        if fd is not None:
+                            os.dup2(fd, 2)
+                            os.close(fd)
+                    except Exception:
+                        pass
+            return _ctx()
+        try:
+            with open(pdf_path, "rb") as f:
+                header = f.read(5)
+            if header != b"%PDF-":
+                return []
+        except Exception:
+            return []
+        base = os.path.splitext(os.path.basename(pdf_path))[0]
+        out_paths = []
+        try:
+            try:
+                fitz.TOOLS.set_verbosity(0)
+            except Exception:
+                pass
+            with _suppress_stderr():
+                doc = fitz.open(pdf_path)
+        except Exception:
+            return []
+        for i in range(min(page_limit, len(doc))):
+            out_path = os.path.join(cache_root, f"{base}_p{i+1}.png")
+            if not os.path.exists(out_path):
+                try:
+                    with _suppress_stderr():
+                        page = doc[i]
+                        pix = page.get_pixmap(dpi=200)
+                    pix.save(out_path)
+                except Exception:
+                    continue
+            out_paths.append(out_path)
+        try:
+            doc.close()
+        except Exception:
+            pass
+        return out_paths
+
+    candidates: List[str] = []
+    for d in bv_dirs:
+        try:
+            for name in os.listdir(d):
+                path = os.path.join(d, name)
+                if os.path.isfile(path):
+                    candidates.append(path)
+        except Exception:
+            continue
+    candidates.sort()
+    for path in candidates:
+        if len(images) >= limit:
+            break
+        ext = os.path.splitext(path)[1].lower()
+        if ext in (".png", ".jpg", ".jpeg", ".webp", ".gif"):
+            payload = _read_image_bytes(path)
+            if payload:
+                b, mime = payload
+                images.append({"bytes": b, "mime": mime, "detail": "high"})
+            continue
+        if ext == ".pdf":
+            for img_path in _pdf_to_images(path):
+                if len(images) >= limit:
+                    break
+                payload = _read_image_bytes(img_path)
+                if payload:
+                    b, mime = payload
+                    images.append({"bytes": b, "mime": mime, "detail": "high"})
+    return images
 
 def build_case_context(case: Dict[str, Any]) -> str:
     meas = list_measurements(case["case_id"])
@@ -120,6 +250,131 @@ def _build_netlist_summary(case: Dict[str, Any], board_id: str, model: str) -> s
         + ", ".join(key_nets)
         + ("\nSignal nets (subset):\n" + ", ".join(signal_nets) if signal_nets else "")
     )
+
+def _build_expected_ranges_context(board_id: str) -> str:
+    ranges = list_expected_ranges(board_id) if board_id else []
+    if not ranges:
+        ranges = []
+    lines = ["\nEXPECTED RANGES (board-specific; label source):"]
+    for r in ranges[:200]:
+        unit = f" {r['unit']}" if r.get("unit") else ""
+        if r.get("expected_min") == r.get("expected_max"):
+            expected = f"{r.get('expected_min','')}{unit}".strip()
+        else:
+            expected = f"{r.get('expected_min','')}–{r.get('expected_max','')}{unit}".strip()
+        src = r.get("source") or "unknown"
+        note = f" (note: {r['note']})" if r.get("note") else ""
+        lines.append(f"- {r['net']} | {r['measurement_type']} | expected: {expected} | source: {src}{note}")
+
+    if board_id:
+        for b in list_baselines():
+            if b.get("board_id") != board_id:
+                continue
+            meas = list_baseline_measurements(b["baseline_id"])
+            for m in meas[:200]:
+                tokens = extract_net_tokens(m.get("name") or "")
+                if not tokens:
+                    continue
+                net = canonicalize_net_name(tokens[0])
+                if not net:
+                    continue
+                name_l = f"{m.get('name','')} {m.get('note','')}".lower()
+                mtype = "voltage"
+                if "diode" in name_l:
+                    mtype = "diode"
+                elif "ohm" in name_l or "resistance" in name_l or "r2g" in name_l:
+                    mtype = "resistance"
+                elif "amp" in name_l or "current" in name_l:
+                    mtype = "current"
+                elif "hz" in name_l or "freq" in name_l:
+                    mtype = "frequency"
+                unit = f" {m.get('unit')}" if m.get("unit") else ""
+                expected = f"{m.get('value','')}{unit}".strip()
+                note = f" (note: {m.get('note')})" if m.get("note") else ""
+                lines.append(f"- {net} | {mtype} | expected: {expected} | source: baseline{note}")
+
+    if len(lines) == 1:
+        return ""
+    return "\n".join(lines)
+
+def _build_no_power_guidance(case: Dict[str, Any], board_id: str, model: str) -> str:
+    symptom = (case.get("symptom") or "").strip().lower()
+    if symptom != "no power":
+        return ""
+    device_family = (case.get("device_family") or "").strip().lower()
+    if not device_family and "iphone" in model.lower():
+        device_family = "iphone"
+    if device_family != "iphone":
+        return ""
+    nets, _ = load_netlist(board_id=board_id, case=case)
+    if not nets:
+        return ""
+    ranges = list_expected_ranges(board_id) if board_id else []
+    ranges_by_net: Dict[str, List[Dict[str, Any]]] = {}
+    for r in ranges:
+        net = r.get("net") or ""
+        ranges_by_net.setdefault(net, []).append(r)
+
+    def _format_expected(net: str) -> str:
+        items = ranges_by_net.get(net, [])
+        if not items:
+            return "expected: (none)"
+        parts = []
+        for r in items[:4]:
+            unit = f" {r['unit']}" if r.get("unit") else ""
+            expected = f"{r.get('expected_min','')}–{r.get('expected_max','')}{unit}".strip()
+            parts.append(f"{r['measurement_type']} {expected} (source={r.get('source','unknown')})")
+        return "expected: " + "; ".join(parts)
+
+    def _points(net: str) -> str:
+        pts = measurement_points_for_net(board_id, net, case=case, k=6)
+        if pts:
+            return ", ".join(pts)
+        return "(no boardview points listed)"
+
+    def _pick_by_patterns(patterns: List[str], limit: int) -> List[str]:
+        out: List[str] = []
+        seen = set()
+        for pat in patterns:
+            for n in nets:
+                if n in seen:
+                    continue
+                if pat in n:
+                    seen.add(n)
+                    out.append(n)
+                    if len(out) >= limit:
+                        return out
+        return out
+
+    usb_input = _pick_by_patterns(
+        ["PPVBUS", "PP_VBUS", "USB_VBUS", "VBUS", "PPDCIN", "PP5V", "PPADAPTER"],
+        limit=3,
+    )
+    batt_main = _pick_by_patterns(
+        ["PP_BATT", "PPBATT", "PP_VDD_MAIN", "PPVDD_MAIN", "PP_BATT_VCC"],
+        limit=3,
+    )
+    always_on = _pick_by_patterns(
+        ["_AON", "_ALWAYS", "PP1V8", "PP0V9", "PP0V8", "PP1V2", "PP2V8", "PP3V0"],
+        limit=4,
+    )
+    ordered = []
+    for group in (usb_input, batt_main, always_on):
+        for n in group:
+            if n not in ordered:
+                ordered.append(n)
+
+    if not ordered:
+        return ""
+
+    lines = [
+        "",
+        f"NO POWER GUIDANCE (IPHONE, board_id={board_id})",
+        "Use only the nets listed here if they exist in the netlist.",
+    ]
+    for n in ordered:
+        lines.append(f"- {n} | points: {_points(n)} | {_format_expected(n)}")
+    return "\n".join(lines)
 def _retrieve_context(case: Dict[str, Any], question: str, include_images: bool) -> Dict[str, Any]:
     attachments = list_attachments(case["case_id"])
 
@@ -147,7 +402,12 @@ def _retrieve_context(case: Dict[str, Any], question: str, include_images: bool)
             uniq.append(h)
         hits = uniq[:10]
 
-    ctx = build_case_context(case) + _build_baseline_context(model=model, board_id=board_id)
+    ctx = (
+        build_case_context(case)
+        + _build_baseline_context(model=model, board_id=board_id)
+        + _build_expected_ranges_context(board_id=board_id)
+        + _build_no_power_guidance(case=case, board_id=board_id, model=model)
+    )
 
     evidence_lines = ["RETRIEVED CONTEXT (cite Source file + page):"]
     for h in hits:
@@ -155,7 +415,8 @@ def _retrieve_context(case: Dict[str, Any], question: str, include_images: bool)
         src = m.get("source_file")
         page = m.get("page")
         label = f"{src}" + (f" p.{page}" if page else "")
-        evidence_lines.append(f"\n--- {label} ---\n{h['document'][:1500]}")
+        source_tag = m.get("evidence_source") or "unknown"
+        evidence_lines.append(f"\n--- {label} | source={source_tag} ---\n{h['document'][:1500]}")
 
     image_inputs: List[Dict[str, Any]] = []
     if include_images:
@@ -166,6 +427,8 @@ def _retrieve_context(case: Dict[str, Any], question: str, include_images: bool)
                     image_inputs.append({"bytes": b, "mime": mime, "detail": "high"})
                 except Exception:
                     continue
+        if board_id:
+            image_inputs.extend(_load_kb_boardview_images(case, board_id=board_id, model=model))
 
     return {
         "attachments": attachments,
@@ -295,10 +558,10 @@ def generate_plan(case: Dict[str, Any], question: str, include_images: bool = Tr
         {
             "requested_measurements": [
                 {
-                    "key": "CHECK_PPBUS_AON",
-                    "net": "PPBUS_AON",
+                    "key": "CHECK_<NETNAME>",
+                    "net": "<NETNAME>",
                     "type": "voltage",
-                    "prompt": "Measure PPBUS_AON to GND",
+                    "prompt": "Measure <NETNAME> to GND",
                     "hint": "Use TP or large cap pad",
                 }
             ]
@@ -321,6 +584,11 @@ def generate_plan(case: Dict[str, Any], question: str, include_images: bool = Tr
             "OUTPUT CONTRACT (STRICT):",
             "1) STEPS (DO THIS NOW)",
             "   - numbered steps, short and actionable",
+            "   - every step MUST include:",
+            "     * net name(s) from netlist summary",
+            "     * where-to-probe refdes (if available from boardview)",
+            "     * CONFIDENCE: <raw 0-1 score>",
+            "     * EVIDENCE: <boardview|schematic|case_history|community>",
             "2) REQUESTED MEASUREMENTS (WHAT I NEED FROM YOU)",
             "   - each item MUST be a single line like:",
             "     KEY: CHECK_<NETNAME> | PROMPT: Measure <NETNAME> to GND | TYPE: voltage | NET: <NETNAME> | OPTIONAL HINT: <where-to-measure>",
@@ -341,6 +609,10 @@ def generate_plan(case: Dict[str, Any], question: str, include_images: bool = Tr
             "INSTRUCTIONS:",
             "- You MUST only reference nets present in the netlist summary above. If unsure, ask for the exact net or a schematic snippet.",
             "- Requested measurement KEY and NET must match the exact net name from the netlist summary (no invented PP* variants).",
+            "- Confidence scores must be raw numeric values between 0 and 1.",
+            "- You MAY use community content, but it must be labeled EVIDENCE: community and should carry a lower confidence score.",
+            "- If a NO POWER GUIDANCE block is present, follow its order and use only the nets listed there.",
+            "- The JSON example uses <NETNAME> as a placeholder; replace it with a real net from the netlist summary.",
             "- Any board-specific claim MUST be supported by either:",
             "  (a) the attached schematic/boardview images, or",
             "  (b) retrieved context above (and cite Source file + page).",
