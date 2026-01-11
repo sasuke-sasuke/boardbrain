@@ -10,7 +10,7 @@ from .rag import get_collection
 
 
 _NET_RE = re.compile(
-    r"\b(?:PP[A-Z0-9_.]+|[A-Z][A-Z0-9_.]*_[A-Z0-9_.]+)\b",
+    r"\b(?:PP[A-Z0-9_.]+|[A-Z][A-Z0-9_.]*_[A-Z0-9_.]+|[0-9][A-Z0-9_.]*_[A-Z0-9_.]+)\b",
     re.IGNORECASE,
 )
 _MEAS_KEY_RE = re.compile(r"\b((?:CHECK_|VERIFY_|MEASURE_|TEST_|READ_))([A-Z0-9_.]+?)(_(?:R2G|DIODE))?\b", re.IGNORECASE)
@@ -413,6 +413,7 @@ def load_netlist(board_id: str = "", model: str = "", case: Optional[Dict[str, A
     report_path = _ingest_report_path(board_id) if board_id else ""
     report_status = (report.get("parse_status") or "").lower()
     report_selected = report.get("selected_boardview_file")
+    report_selected_files = report.get("selected_boardview_files") or []
     report_parser = report.get("parser_used")
     report_error = report.get("parse_error")
     report_files = report.get("detected_boardview_files") or []
@@ -492,6 +493,7 @@ def load_netlist(board_id: str = "", model: str = "", case: Optional[Dict[str, A
         meta["ingest_report_path"] = report_path if os.path.exists(report_path) else ""
     if report:
         meta["boardview_file_used"] = report_selected
+        meta["boardview_files_used"] = report_selected_files
         meta["boardview_parse_status"] = report.get("parse_status")
         meta["boardview_parse_error"] = report_error
         meta["boardview_parser_used"] = report_parser
@@ -545,6 +547,10 @@ def choose_primary_power_rail(board_id: str, case: Optional[Dict[str, Any]] = No
     if g3h:
         return sorted(g3h)[0]
     for cand in ("PPVBAT", "PPDCIN", "PPBUS", "PPBUS_S5"):
+        matches = [n for n in nets if n.startswith(cand)]
+        if matches:
+            return sorted(matches)[0]
+    for cand in ("CHARGER_IN", "VBUS", "ADP_", "DCIN", "VIN", "VCC", "VDD", "ALW", "BATT"):
         matches = [n for n in nets if n.startswith(cand)]
         if matches:
             return sorted(matches)[0]

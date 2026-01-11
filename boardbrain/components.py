@@ -7,7 +7,9 @@ from typing import Dict, Any, List, Tuple, Optional
 from .config import SETTINGS
 
 REFDES_RE = re.compile(
-    r"\b(?:TP\d{1,5}|FB\d{1,5}|[URCQLDFJPX]\d{1,5})\b",
+    r"\b(?:TPU?\d{1,5}|FB\d{1,5}|CN\d{1,5}|RN\d{1,5}|"
+    r"(?:PU|PC|PR|PL|PD|PQ|PJ|PF|PT|PM|PS)\d{1,5}|"
+    r"[URCQLDFJPXY]\d{1,5})\b",
     re.IGNORECASE,
 )
 COMP_MEAS_RE = re.compile(
@@ -67,12 +69,19 @@ def load_component_index(board_id: str = "", model: str = "", case: Optional[Dic
     return refdes, meta
 
 
-def enforce_component_guardrail(text: str, known_components: set) -> Tuple[str, Dict[str, Any]]:
+def enforce_component_guardrail(
+    text: str,
+    known_components: set,
+    allow_tokens: Optional[set] = None,
+) -> Tuple[str, Dict[str, Any]]:
     if not text or not known_components:
         return text, {"invalid_refdes": [], "replaced_count": 0}
+    allow_tokens = {t.upper() for t in (allow_tokens or set())}
     invalid: List[str] = []
     def _sub(m: re.Match) -> str:
         token = m.group(0).upper()
+        if token in allow_tokens:
+            return token
         if token in known_components:
             return token
         invalid.append(token)

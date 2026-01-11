@@ -35,6 +35,8 @@ def detect_boardview_format(path: str, data: bytes) -> str | None:
     if ext == ".brd":
         if data.startswith(b"\x23\xe2\x63\x28") or b"str_length:" in data or b"var_data:" in data or b"BRDOUT:" in data:
             return "BRD"
+    if ext == ".tvw":
+        return "TVW_STRINGS"
     if ext == ".pcb":
         return "PCB_EMBEDDED_ZLIB"
     if ext == ".bvr":
@@ -237,6 +239,9 @@ def parse_boardview(path: str) -> Tuple[set[str], Dict[str, List[Dict[str, Any]]
     if fmt == "XZZPCB":
         from .xzzpcb_parser import parse_xzzpcb
         return parse_xzzpcb(path)
+    if fmt == "TVW_STRINGS":
+        from .tvw_parser import parse_tvw
+        return parse_tvw(path)
 
     strings = _extract_ascii_strings(data)
     if not strings:

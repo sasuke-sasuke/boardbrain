@@ -239,20 +239,44 @@ def _build_netlist_summary(case: Dict[str, Any], board_id: str, model: str) -> s
     primary = choose_primary_power_rail(board_id, case=case) or "unknown"
     prefixes = ("PPBUS", "PP3V", "PP5V", "PP1V", "PP0V", "PPV", "PPDCIN", "USBC", "VBUS")
     key_nets = sorted([n for n in nets if n.startswith(prefixes)])
+    if not key_nets:
+        power_prefixes = (
+            "CHG_",
+            "CHARGER_",
+            "ADP_",
+            "ALW",
+            "VCC",
+            "VDD",
+            "VBUS",
+            "VBAT",
+            "VIN",
+            "DCIN",
+            "3V",
+            "5V",
+            "1V",
+        )
+        key_nets = sorted([n for n in nets if n.startswith(power_prefixes)])
     if len(key_nets) > 200:
         key_nets = key_nets[:200]
     signal_nets = sorted([n for n in nets if not n.startswith("PP") and "_" in n])
     if len(signal_nets) > 200:
         signal_nets = signal_nets[:200]
+    guard = "" if "PPBUS_AON" in nets else " Do not assume PPBUS_AON unless it exists in this netlist."
     return (
-        f"NETLIST SUMMARY: {meta.get('net_count', len(nets))} nets. Primary rail: {primary}.\n"
-        "Only use nets from this list:\n"
+        f"NETLIST SUMMARY: {meta.get('net_count', len(nets))} nets. Primary rail: {primary}.{guard}\n"
+        "Use nets from this boardview netlist (list below is a subset for convenience):\n"
         + ", ".join(key_nets)
         + ("\nSignal nets (subset):\n" + ", ".join(signal_nets) if signal_nets else "")
     )
 
 def _build_expected_ranges_context(board_id: str) -> str:
     ranges = list_expected_ranges(board_id) if board_id else []
+    known_nets = set()
+    if board_id:
+        nets, _ = load_netlist(board_id=board_id, model="", case=None)
+        known_nets = set(nets)
+        if known_nets:
+            ranges = [r for r in ranges if r.get("net") in known_nets]
     if not ranges:
         ranges = []
     lines = ["\nEXPECTED RANGES (board-specific; label source):"]
@@ -278,6 +302,8 @@ def _build_expected_ranges_context(board_id: str) -> str:
                 net = canonicalize_net_name(tokens[0])
                 if not net:
                     continue
+                if known_nets and net not in known_nets:
+                    continue
                 name_l = f"{m.get('name','')} {m.get('note','')}".lower()
                 mtype = "voltage"
                 if "diode" in name_l:
@@ -295,7 +321,7 @@ def _build_expected_ranges_context(board_id: str) -> str:
 
     if len(lines) == 1:
         return ""
-    return "\n".join(lines)
+        return "\n".join(lines)
 
 def _build_no_power_guidance(case: Dict[str, Any], board_id: str, model: str) -> str:
     symptom = (case.get("symptom") or "").strip().lower()
@@ -310,6 +336,7 @@ def _build_no_power_guidance(case: Dict[str, Any], board_id: str, model: str) ->
     if not nets:
         return ""
     ranges = list_expected_ranges(board_id) if board_id else []
+    nets_sorted = sorted(nets)
     ranges_by_net: Dict[str, List[Dict[str, Any]]] = {}
     for r in ranges:
         net = r.get("net") or ""
@@ -332,14 +359,25 @@ def _build_no_power_guidance(case: Dict[str, Any], board_id: str, model: str) ->
             return ", ".join(pts)
         return "(no boardview points listed)"
 
-    def _pick_by_patterns(patterns: List[str], limit: int) -> List[str]:
+    def _skip_candidate(net: str) -> bool:
+        return any(tok in net for tok in ("DET", "SENSE", "ISENSE", "VSENSE"))
+
+    def _pick_by_patterns(patterns: List[Tuple[str, str]], limit: int) -> List[str]:
         out: List[str] = []
         seen = set()
-        for pat in patterns:
-            for n in nets:
+        for pat, mode in patterns:
+            for n in nets_sorted:
                 if n in seen:
                     continue
-                if pat in n:
+                if _skip_candidate(n):
+                    continue
+                if mode == "prefix":
+                    match = n.startswith(pat)
+                elif mode == "suffix":
+                    match = n.endswith(pat)
+                else:
+                    match = pat in n
+                if match:
                     seen.add(n)
                     out.append(n)
                     if len(out) >= limit:
@@ -347,15 +385,40 @@ def _build_no_power_guidance(case: Dict[str, Any], board_id: str, model: str) ->
         return out
 
     usb_input = _pick_by_patterns(
-        ["PPVBUS", "PP_VBUS", "USB_VBUS", "VBUS", "PPDCIN", "PP5V", "PPADAPTER"],
+        [
+            ("PPVBUS", "prefix"),
+            ("PP_VBUS", "prefix"),
+            ("USB_VBUS", "prefix"),
+            ("VBUS", "prefix"),
+            ("PPDCIN", "prefix"),
+            ("PP5V", "prefix"),
+            ("PPADAPTER", "prefix"),
+        ],
         limit=3,
     )
     batt_main = _pick_by_patterns(
-        ["PP_BATT", "PPBATT", "PP_VDD_MAIN", "PPVDD_MAIN", "PP_BATT_VCC"],
+        [
+            ("PP_VDD_MAIN", "prefix"),
+            ("PPVDD_MAIN", "prefix"),
+            ("PP_BATT", "prefix"),
+            ("PPBATT", "prefix"),
+            ("PPVBAT", "prefix"),
+            ("PP_VBAT", "prefix"),
+            ("PP_BATT_VCC", "prefix"),
+        ],
         limit=3,
     )
     always_on = _pick_by_patterns(
-        ["_AON", "_ALWAYS", "PP1V8", "PP0V9", "PP0V8", "PP1V2", "PP2V8", "PP3V0"],
+        [
+            ("_AON", "suffix"),
+            ("_ALWAYS", "suffix"),
+            ("PP1V8", "prefix"),
+            ("PP0V9", "prefix"),
+            ("PP0V8", "prefix"),
+            ("PP1V2", "prefix"),
+            ("PP2V8", "prefix"),
+            ("PP3V0", "prefix"),
+        ],
         limit=4,
     )
     ordered = []
@@ -375,6 +438,18 @@ def _build_no_power_guidance(case: Dict[str, Any], board_id: str, model: str) ->
     for n in ordered:
         lines.append(f"- {n} | points: {_points(n)} | {_format_expected(n)}")
     return "\n".join(lines)
+
+def _has_kb_truth(hits: List[Dict[str, Any]], board_id: str, model: str) -> bool:
+    for h in hits:
+        m = h.get("metadata") or {}
+        if (m.get("doc_type") or "") not in ("schematic", "datasheet", "manual"):
+            continue
+        if board_id:
+            if m.get("board_id") == board_id:
+                return True
+        elif model and m.get("model") == model:
+            return True
+    return False
 def _retrieve_context(case: Dict[str, Any], question: str, include_images: bool) -> Dict[str, Any]:
     attachments = list_attachments(case["case_id"])
 
@@ -419,6 +494,7 @@ def _retrieve_context(case: Dict[str, Any], question: str, include_images: bool)
         evidence_lines.append(f"\n--- {label} | source={source_tag} ---\n{h['document'][:1500]}")
 
     image_inputs: List[Dict[str, Any]] = []
+    kb_images = []
     if include_images:
         for a in attachments:
             if a.get("type") in ("schematic", "boardview_screenshot"):
@@ -428,7 +504,8 @@ def _retrieve_context(case: Dict[str, Any], question: str, include_images: bool)
                 except Exception:
                     continue
         if board_id:
-            image_inputs.extend(_load_kb_boardview_images(case, board_id=board_id, model=model))
+            kb_images = _load_kb_boardview_images(case, board_id=board_id, model=model)
+            image_inputs.extend(kb_images)
 
     return {
         "attachments": attachments,
@@ -438,6 +515,7 @@ def _retrieve_context(case: Dict[str, Any], question: str, include_images: bool)
         "ctx": ctx,
         "evidence_lines": evidence_lines,
         "image_inputs": image_inputs,
+        "kb_boardview_images_count": len(kb_images),
     }
 
 
@@ -512,8 +590,8 @@ def answer_question(case: Dict[str, Any], question: str, include_images: bool = 
     info = _retrieve_context(case, question, include_images=include_images)
 
     if is_board_specific_question(question):
-        has_case_truth = has_required_evidence(info["attachments"])
-        has_kb_truth = any((h.get("metadata") or {}).get("doc_type") in ("schematic", "datasheet", "manual") for h in info["hits"])
+        has_case_truth = has_required_evidence(info["attachments"]) or (info.get("kb_boardview_images_count", 0) > 0)
+        has_kb_truth = _has_kb_truth(info["hits"], info["board_id"], info["model"])
         if not (has_case_truth or has_kb_truth):
             return refusal_message_missing_evidence()
 
@@ -544,8 +622,8 @@ def generate_plan(case: Dict[str, Any], question: str, include_images: bool = Tr
     info = _retrieve_context(case, question, include_images=include_images)
 
     if is_board_specific_question(question):
-        has_case_truth = has_required_evidence(info["attachments"])
-        has_kb_truth = any((h.get("metadata") or {}).get("doc_type") in ("schematic", "datasheet", "manual") for h in info["hits"])
+        has_case_truth = has_required_evidence(info["attachments"]) or (info.get("kb_boardview_images_count", 0) > 0)
+        has_kb_truth = _has_kb_truth(info["hits"], info["board_id"], info["model"])
         if not (has_case_truth or has_kb_truth):
             return refusal_message_missing_evidence()
 

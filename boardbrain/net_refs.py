@@ -10,7 +10,11 @@ from .netlist import canonicalize_net_name, extract_net_tokens, load_netlist
 from .components import load_component_index
 
 
-_REF_RE = re.compile(r"\b(?:TP|FB|C|R|L|D|Q|U|F|X|J|P)\d{1,5}\b", re.IGNORECASE)
+_REF_RE = re.compile(
+    r"\b(?:TPU|TP|FB|PU|PC|PR|PL|PD|PQ|PJ|PF|PT|PM|PS|CN|RN|"
+    r"U|Q|L|C|R|D|F|J|P|X|Y)\d{1,5}[A-Z0-9]*\b",
+    re.IGNORECASE,
+)
 _PREF_ORDER = ["TP", "P", "C", "L", "J", "R", "D", "Q", "U", "F", "X"]
 _PREF_RANK = {p: i for i, p in enumerate(_PREF_ORDER)}
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 import os
 import json
+import html
 import re
 import datetime
 import streamlit as st
@@ -60,7 +61,85 @@ init_db()
 os.makedirs(SETTINGS.data_dir, exist_ok=True)
 os.makedirs(SETTINGS.kb_raw_dir, exist_ok=True)
 
-st.title("BoardBrain v1.1 — MacBook USB‑C No‑Power Copilot (schematic-first)")
+st.title("BoardBrain - Motherboard Troubleshooting Tool")
+
+st.markdown(
+    """
+<style>
+:root {
+  --net-bg: #f2efe6;
+  --net-fg: #2d2a24;
+  --card-bg: #fbf8f1;
+  --card-border: #e6dccb;
+  --status-pending: #b46b00;
+  --status-done: #1f7a3f;
+  --status-other: #6a6a6a;
+}
+.net-token {
+  background: var(--net-bg);
+  color: var(--net-fg);
+  padding: 2px 6px;
+  border-radius: 6px;
+  font-weight: 600;
+  font-family: "IBM Plex Mono", "Menlo", "Consolas", monospace;
+  font-size: 0.95em;
+  border: 1px solid var(--card-border);
+}
+.req-card {
+  background: var(--card-bg);
+  border: 1px solid var(--card-border);
+  border-radius: 10px;
+  padding: 10px 12px;
+  margin: 10px 0;
+}
+.req-header {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 6px;
+}
+.req-status {
+  font-weight: 700;
+  font-size: 0.85em;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--card-border);
+  text-transform: uppercase;
+}
+.req-status.pending { color: var(--status-pending); }
+.req-status.done { color: var(--status-done); }
+.req-status.other { color: var(--status-other); }
+.req-key {
+  font-weight: 600;
+  color: #2b2b2b;
+}
+.req-line {
+  margin: 4px 0;
+  color: #2b2b2b;
+}
+.req-label {
+  font-weight: 700;
+  margin-right: 6px;
+}
+.req-points {
+  margin-top: 6px;
+  font-size: 0.95em;
+}
+.evidence-tag {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: #efe6d6;
+  color: #3a342b;
+  border: 1px solid var(--card-border);
+  font-size: 0.85em;
+  font-family: "IBM Plex Mono", "Menlo", "Consolas", monospace;
+}
+</style>
+""",
+    unsafe_allow_html=True,
+)
 
 _SIGNAL_SUFFIXES = (
     "EN",
@@ -141,6 +220,104 @@ def _render_requested_measurements_section(
         out.append("")
     out.extend(block)
     return "\n".join(out).strip()
+
+
+_NET_TOKEN_RE = re.compile(r"\b[A-Z0-9_.+-]{3,}\b")
+
+_EVIDENCE_LINE_RE = re.compile(r"^\s*(?:[-*]\s*)?EVIDENCE\s*:\s*(.+)$", re.IGNORECASE)
+_EVIDENCE_PAGE_RE = re.compile(r"(?:p(?:age)?[.:]?\s*(\d+))", re.IGNORECASE)
+
+
+def _strip_requested_measurements_block(text: str) -> str:
+    lines = text.splitlines()
+    out = []
+    in_req = False
+    for line in lines:
+        if re.search(r"REQUESTED MEASUREMENTS", line, re.IGNORECASE):
+            in_req = True
+            continue
+        if in_req:
+            if re.match(r"^[A-Z][A-Z0-9 /()_-]{3,}$", line.strip()):
+                in_req = False
+                out.append(line)
+            else:
+                continue
+        if not in_req:
+            out.append(line)
+    return "\n".join(out).strip()
+
+
+def _format_evidence_label(raw: str) -> tuple[str, str]:
+    src = raw.strip().strip("[]()")
+    lower = src.lower()
+    page = ""
+    m = _EVIDENCE_PAGE_RE.search(src)
+    if m:
+        page = m.group(1)
+        src = _EVIDENCE_PAGE_RE.sub("", src).strip()
+    label = "Evidence"
+    if "schematic" in lower or ".pdf" in lower:
+        label = "Schematic"
+    elif "boardview" in lower:
+        label = "Boardview"
+    else:
+        filename = os.path.basename(src)
+        if filename:
+            label = f"Attachment: {filename}"
+    if page:
+        label = f"{label} p.{page}"
+    return label, raw.strip()
+
+
+def _format_evidence_line(line: str) -> str | None:
+    m = _EVIDENCE_LINE_RE.match(line)
+    if not m:
+        return None
+    raw = m.group(1).strip()
+    label, full = _format_evidence_label(raw)
+    prefix = html.escape(m.group(0).split(":", 1)[0])
+    return (
+        f"{prefix}: "
+        f"<span class=\"evidence-tag\" title=\"{html.escape(full)}\">{html.escape(label)}</span>"
+    )
+
+
+def _wrap_net_tokens(escaped: str, known_nets: set) -> str:
+    def _fallback_net(token: str) -> bool:
+        if len(token) < 4:
+            return False
+        if not token.isupper():
+            return False
+        return "_" in token or any(ch.isdigit() for ch in token) or token.startswith("PP")
+    def _sub(m: re.Match) -> str:
+        token = m.group(0)
+        if known_nets:
+            if token in known_nets:
+                return f'<span class="net-token">{token}</span>'
+            return token
+        if _fallback_net(token):
+            return f'<span class="net-token">{token}</span>'
+        return token
+    return _NET_TOKEN_RE.sub(_sub, escaped)
+
+
+def _render_text_html(text: str, known_nets: set, strip_requested: bool = True) -> str:
+    if not text:
+        return ""
+    cleaned = html.unescape(text)
+    cleaned = re.sub(r"</?span[^>]*>", "", cleaned)
+    cleaned = cleaned.replace("<br>", "\n")
+    if strip_requested:
+        cleaned = _strip_requested_measurements_block(cleaned)
+    out_lines: list[str] = []
+    for line in cleaned.splitlines():
+        evidence_html = _format_evidence_line(line)
+        if evidence_html is not None:
+            out_lines.append(evidence_html)
+            continue
+        escaped = html.escape(line)
+        out_lines.append(_wrap_net_tokens(escaped, known_nets))
+    return "<br>".join(out_lines)
 
 
 def _load_plan_state(case_id: str) -> None:
@@ -232,6 +409,9 @@ def _build_debug_report(
         for p in net_meta.get("boardview_files_preview", [])[:3]:
             lines.append(f"- boardview_file: {p}")
     lines.append(f"- boardview_selected_file: {net_meta.get('boardview_file_used','')}")
+    if net_meta.get("boardview_files_used"):
+        for p in net_meta.get("boardview_files_used", []):
+            lines.append(f"- boardview_selected_file: {p}")
     lines.append(f"- boardview_parser_used: {net_meta.get('boardview_parser_used','')}")
     lines.append(f"- boardview_parse_status: {net_meta.get('boardview_parse_status','')}")
     if net_meta.get("boardview_parse_error"):
@@ -510,14 +690,41 @@ with st.sidebar:
     if selected == "(new case)":
         st.subheader("Create case")
         st.caption("Format: A2338_820-02020_NoPower_YYYY-MM-DD")
-        c_model = st.text_input("Model", value="A2338")
-        c_board = st.text_input("Board ID", value="820-02020")
+        kb_root = SETTINGS.kb_raw_dir
+        families = []
+        kb_tree = {}
+        if os.path.isdir(kb_root):
+            for fam in sorted(os.listdir(kb_root)):
+                if fam.startswith("."):
+                    continue
+                fam_path = os.path.join(kb_root, fam)
+                if not os.path.isdir(fam_path):
+                    continue
+                families.append(fam)
+                kb_tree[fam] = {}
+                for model in sorted(os.listdir(fam_path)):
+                    if model.startswith("."):
+                        continue
+                    model_path = os.path.join(fam_path, model)
+                    if not os.path.isdir(model_path):
+                        continue
+                    boards = [
+                        b for b in sorted(os.listdir(model_path))
+                        if os.path.isdir(os.path.join(model_path, b)) and not b.startswith(".")
+                    ]
+                    if boards:
+                        kb_tree[fam][model] = boards
+        device_family = st.selectbox("Device family", families, index=0 if families else None)
+        models = sorted(kb_tree.get(device_family, {}).keys()) if device_family else []
+        model = st.selectbox("Model", models, index=0 if models else None)
+        boards = kb_tree.get(device_family, {}).get(model, []) if device_family and model else []
+        board_id = st.selectbox("Board ID", boards, index=0 if boards else None)
+        c_model = model or ""
+        c_board = board_id or ""
         c_kind = st.text_input("Issue tag", value="NoPower")
         c_date = st.text_input("Date", value="YYYY-MM-DD")
         case_id = st.text_input("Case ID", value=f"{c_model}_{c_board}_{c_kind}_{c_date}")
         title = st.text_input("Title", value="A2337 No Power")
-        device_family = st.text_input("Device family", value="MacBook")
-        model = st.text_input("Model (free text)", value=c_model)
         symptom = st.text_area("Symptom", value="USB‑C: 5V ~0.20A, no power")
         if st.button("Create / Open"):
             create_case(case_id=case_id, title=title, device_family=device_family, model=model, board_id=c_board, symptom=symptom)
@@ -958,9 +1165,19 @@ def _run_plan_update(
             st.session_state["requested_measurements_parse_error"] = "invalid_plan_item_net"
             items = st.session_state.get("plan_state", {}).get("requested_measurements", [])
     plan_text_display = _strip_cheat_sheet(plan_text_display)
+    allow_tokens = set()
+    board_id = (case.get("board_id") or "").upper()
+    model = (case.get("model") or "").upper()
+    for token in (board_id, model):
+        if token:
+            allow_tokens.add(token)
+            for part in re.split(r"[^A-Z0-9]+", token):
+                if part:
+                    allow_tokens.add(part)
     comp_guarded_text, comp_report = enforce_component_guardrail(
         plan_text_display,
         st.session_state.get("known_components", set()),
+        allow_tokens=allow_tokens,
     )
     plan_text_display = comp_guarded_text
     report["invalid_refdes_detected"] = comp_report.get("invalid_refdes", [])
@@ -1128,6 +1345,7 @@ with left:
         st.session_state["chat_limit"] = 20
     messages = list_chat_messages(case["case_id"])
     messages_rev = list(reversed(messages))
+    known_nets = st.session_state.get("known_nets", set())
 
     with st.form("chat_form", clear_on_submit=True):
         user_text = st.text_input("Message")
@@ -1136,7 +1354,7 @@ with left:
     display_messages = messages_rev[: st.session_state["chat_limit"]]
     for m in display_messages:
         with st.chat_message(m["role"]):
-            st.markdown(m["content"])
+            st.markdown(_render_text_html(m["content"], known_nets), unsafe_allow_html=True)
 
     if len(messages_rev) > st.session_state["chat_limit"]:
         if st.button("Load older messages", key="load_older"):
@@ -1443,6 +1661,22 @@ with left:
     with st.expander("Expected Ranges (manual entry)", expanded=False):
         board_id = case.get("board_id", "")
         known_nets = st.session_state.get("known_nets", set())
+        allowed_types = {"voltage", "resistance", "diode", "current", "frequency", "continuity"}
+        type_aliases = {
+            "v": "voltage",
+            "volt": "voltage",
+            "volts": "voltage",
+            "ohm": "resistance",
+            "ohms": "resistance",
+            "r2g": "resistance",
+            "diodev": "diode",
+            "a": "current",
+            "amp": "current",
+            "amps": "current",
+            "hz": "frequency",
+            "freq": "frequency",
+            "cont": "continuity",
+        }
         st.caption("Add per-board expected ranges from known-good measurements. These are used as truth for diagnostics.")
         er_net = st.text_input("Net", value="")
         er_type = st.selectbox(
@@ -1506,6 +1740,10 @@ with left:
                         unit = tokens[2] if len(tokens) > 2 else ""
                         mtype = tokens[3] if len(tokens) > 3 else "voltage"
                         note = " ".join(tokens[4:]) if len(tokens) > 4 else ""
+                    mtype = (mtype or "voltage").strip().lower()
+                    mtype = type_aliases.get(mtype, mtype)
+                    if mtype not in allowed_types:
+                        mtype = "voltage"
                     canon = canonicalize_net_name(net_raw)
                     if not canon:
                         continue
@@ -1543,6 +1781,8 @@ with left:
                             continue
                         net = canonicalize_net_name(tokens[0])
                         if not net:
+                            continue
+                        if known_nets and net not in known_nets:
                             continue
                         name_l = f"{m.get('name','')} {m.get('note','')}".lower()
                         mtype = "voltage"
@@ -1643,21 +1883,64 @@ with right:
         watermark_parts.append(f"Board: {case.get('board_id')}")
     st.caption(" | ".join([p for p in watermark_parts if p]))
     if latest_plan:
-        st.markdown(latest_plan)
+        known_nets = st.session_state.get("known_nets", set())
+        plan_lines = latest_plan.splitlines()
+        max_lines = 24
+        if len(plan_lines) > max_lines:
+            preview = "\n".join(plan_lines[:max_lines]).rstrip()
+            preview = preview + "\n…"
+            st.markdown(_render_text_html(preview, known_nets), unsafe_allow_html=True)
+            with st.expander(f"Show full plan ({len(plan_lines)} lines)", expanded=False):
+                st.markdown(_render_text_html(latest_plan, known_nets), unsafe_allow_html=True)
+        else:
+            st.markdown(_render_text_html(latest_plan, known_nets), unsafe_allow_html=True)
     else:
         st.info("No plan yet. Use Update Plan to generate the first plan.")
 
     st.subheader("Requested Measurements")
     reqs = plan_state.get("requested_measurements") or []
     if reqs:
+        known_nets = st.session_state.get("known_nets", set())
         for r in reqs:
-            status = r["status"].upper()
-            st.write(f"- [{status}] {r['key']}: {r['prompt']}")
-            if r.get("status") == "pending":
-                meta = r.get("meta") or {}
-                points = meta.get("points") or []
-                if points:
-                    st.caption(f"Measurement points (boardview): {', '.join(points)}")
+            meta = r.get("meta") or {}
+            net = meta.get("net") or ""
+            mtype = meta.get("type") or ""
+            hint = meta.get("hint") or ""
+            points = meta.get("points") or []
+            status = (r.get("status") or "other").lower()
+            status_label = status.upper()
+            status_class = "other"
+            if status == "pending":
+                status_class = "pending"
+            elif status == "done":
+                status_class = "done"
+            net_badge = f'<span class="net-token">{html.escape(net)}</span>' if net else ""
+            prompt = html.escape(r.get("prompt") or "")
+            key = html.escape(r.get("key") or "")
+            hint_html = html.escape(hint) if hint else ""
+            points_html = ", ".join(html.escape(p) for p in points) if points else "(no boardview points listed)"
+            lines = [
+                '<div class="req-card">',
+                '  <div class="req-header">',
+                f'    <span class="req-status {status_class}">{status_label}</span>',
+                f'    <span class="req-key">{key}</span>',
+                f'    {net_badge}',
+                '  </div>',
+                f'  <div class="req-line"><span class="req-label">Prompt:</span> {prompt}</div>',
+            ]
+            if mtype:
+                lines.append(
+                    f'  <div class="req-line"><span class="req-label">Type:</span> {html.escape(str(mtype))}</div>'
+                )
+            if hint_html:
+                lines.append(
+                    f'  <div class="req-line"><span class="req-label">Hint:</span> {hint_html}</div>'
+                )
+            lines.append(
+                f'  <div class="req-points"><span class="req-label">Measurement points (boardview):</span> {points_html}</div>'
+            )
+            lines.append("</div>")
+            st.markdown("\n".join(lines), unsafe_allow_html=True)
     else:
         st.write("None yet.")
 
@@ -1672,7 +1955,8 @@ with right:
         labels = {f"v{p['version']} — {p['created_at']}": p for p in plans}
         selected_label = st.selectbox("Select plan version", list(labels.keys()))
         selected_plan = labels[selected_label]
-        st.markdown(selected_plan["plan_markdown"])
+        known_nets = st.session_state.get("known_nets", set())
+        st.markdown(_render_text_html(selected_plan["plan_markdown"], known_nets), unsafe_allow_html=True)
     else:
         st.write("No previous plans.")
 

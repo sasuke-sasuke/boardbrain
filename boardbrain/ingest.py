@@ -46,12 +46,38 @@ def infer_evidence_source(path: str) -> str:
 
 
 _RE_BOARD_ID = re.compile(r"\b\d{3}-\d{5}(?:_\d{3}-\d{5})?\b")
+_RE_BOARD_ID_MULTI = re.compile(r"\b\d{3}-\d{5}_\d{3}-\d{5}\b")
 _RE_MODEL = re.compile(r"\bA\d{4}\b", re.IGNORECASE)
 
 
 def infer_board_id(path: str) -> str | None:
-    m = _RE_BOARD_ID.search(path.strip())
-    return m.group(0) if m else None
+    p = path.strip()
+    m = _RE_BOARD_ID_MULTI.search(p)
+    if m:
+        return m.group(0)
+    m = _RE_BOARD_ID.search(p)
+    if m:
+        return m.group(0)
+    try:
+        rel = os.path.relpath(p, SETTINGS.kb_raw_dir).replace("\\", "/")
+        parts = [x for x in rel.split("/") if x]
+        if len(parts) >= 3:
+            candidate = parts[2]
+            ignore = {
+                "schematic",
+                "boardview",
+                "boardview_screens",
+                "notes",
+                "photos",
+                "reference",
+                "silkscreen",
+                "attachments",
+            }
+            if candidate.lower() not in ignore and any(ch.isdigit() for ch in candidate):
+                return candidate
+    except Exception:
+        pass
+    return None
 
 
 def infer_model(path: str) -> str | None:
@@ -231,14 +257,38 @@ def main() -> None:
             ext = os.path.splitext(p)[1].lower()
             exts.append((p, ext))
         if family and family.lower() == "iphone":
-            pref = [".pcb", ".bvr", ".brd"]
+            pref = [".pcb", ".bvr", ".brd", ".tvw"]
         else:
-            pref = [".bvr", ".pcb", ".brd"]
+            pref = [".bvr", ".tvw", ".pcb", ".brd"]
         for ext in pref:
             matches = [p for p, e in exts if e == ext]
             if matches:
                 return sorted(matches)[0]
         return sorted(candidates)[0]
+
+    def _choose_boardview_files(board_id: str, candidates: List[str]) -> List[str]:
+        if not candidates:
+            return []
+        family = None
+        if candidates:
+            parts = candidates[0].replace("\\", "/").split("/")
+            if "kb_raw" in parts:
+                idx = parts.index("kb_raw")
+                if idx + 1 < len(parts):
+                    family = parts[idx + 1]
+        exts = []
+        for p in candidates:
+            ext = os.path.splitext(p)[1].lower()
+            exts.append((p, ext))
+        if family and family.lower() == "iphone":
+            pref = [".pcb", ".bvr", ".brd", ".tvw"]
+        else:
+            pref = [".bvr", ".tvw", ".pcb", ".brd"]
+        for ext in pref:
+            matches = [p for p, e in exts if e == ext]
+            if matches:
+                return sorted(matches)
+        return sorted(candidates)
 
     for root, _, files in os.walk(SETTINGS.kb_raw_dir):
         for fn in files:
@@ -333,54 +383,110 @@ def main() -> None:
             report["detected_boardview_files"].append(
                 {"path": p, "size_bytes": size, "ext": os.path.splitext(p)[1].lower()}
             )
-        selected = _choose_boardview_file(board_id, paths_sorted)
+        selected_files: List[str] = []
+        if "_" in board_id:
+            selected_files = _choose_boardview_files(board_id, paths_sorted)
+        if not selected_files:
+            selected = _choose_boardview_file(board_id, paths_sorted)
+            selected_files = [selected] if selected else []
         parser_used = None
-        if selected:
+        if selected_files:
             try:
-                with open(selected, "rb") as f:
+                with open(selected_files[0], "rb") as f:
                     head = f.read(256)
-                parser_used = detect_boardview_format(selected, head)
+                parser_used = detect_boardview_format(selected_files[0], head)
             except Exception:
                 parser_used = "unknown"
-        if not selected:
+        if not selected_files:
             report["parse_error"] = "no_boardview_candidates"
             boardview_reports[board_id] = report
             continue
-        report["selected_boardview_file"] = selected
+        report["selected_boardview_file"] = selected_files[0] if selected_files else None
+        report["selected_boardview_files"] = selected_files
         report["parser_used"] = parser_used
-        print(f"[boardview] selected: {selected} (parser={parser_used})")
+        if len(selected_files) > 1:
+            print(f"[boardview] selected (multi): {len(selected_files)} files")
+            for p in selected_files:
+                print(f"[boardview] selected: {p}")
+        else:
+            print(f"[boardview] selected: {selected_files[0]} (parser={parser_used})")
         if parser_used in (None, "unknown"):
             report["parse_error"] = "unsupported_format"
             report["parse_status"] = "unsupported_format"
             report["parser_used"] = parser_used or "unknown"
             report["source_reason"] = "boardview_unsupported"
             boardview_reports[board_id] = report
-            print(f"[boardview] parse failed: {selected} (unsupported format)")
+            print(f"[boardview] parse failed: {selected_files[0]} (unsupported format)")
             continue
-        try:
-            nets, net_to_refs, meta = parse_boardview(selected)
-        except Exception as e:
-            report["parse_error"] = str(e)
-            if str(e) in ("unsupported_format", "no_valid_zlib_streams", "no_valid_streams"):
-                report["parse_status"] = "unsupported_format"
-                report["source_reason"] = "boardview_unsupported"
-            elif str(e) == "xzzpcb_missing_or_invalid_key":
-                report["parse_status"] = "fail"
-                report["source_reason"] = "boardview_key_missing"
+        nets: set[str] = set()
+        net_to_refs: Dict[str, List[Dict[str, Any]]] = {}
+        components: set[str] = set()
+        parse_errors: List[str] = []
+        formats: List[str] = []
+        parse_status = "success"
+        sub_ids = board_id.split("_") if "_" in board_id else []
+
+        def _merge_refs(dest: Dict[str, Dict[str, Dict[str, Any]]], src: Dict[str, List[Dict[str, Any]]], sub_board: str | None) -> None:
+            for net, refs in (src or {}).items():
+                dest.setdefault(net, {})
+                for r in refs:
+                    if isinstance(r, dict):
+                        ref = (r.get("refdes") or "").upper()
+                        entry = dict(r)
+                    else:
+                        ref = str(r).upper()
+                        entry = {"refdes": ref}
+                    if not ref:
+                        continue
+                    if sub_board:
+                        entry.setdefault("sub_board", sub_board)
+                    dest[net].setdefault(ref, entry)
+
+        merged_refs: Dict[str, Dict[str, Dict[str, Any]]] = {}
+        for selected in selected_files:
+            sub_board = None
+            if sub_ids:
+                for part in sub_ids:
+                    if part in os.path.basename(selected):
+                        sub_board = part
+                        break
+            try:
+                n, r, meta = parse_boardview(selected)
+            except Exception as e:
+                parse_errors.append(f"{os.path.basename(selected)}: {e}")
+                parse_status = "partial_success"
+                continue
+            nets.update(n or [])
+            _merge_refs(merged_refs, r or {}, sub_board)
+            comps = meta.get("components") or []
+            components.update([c for c in comps if c])
+            fmt = meta.get("format") or parser_used or "unknown"
+            formats.append(fmt)
+            if meta.get("parse_status") == "partial_success":
+                parse_status = "partial_success"
+
+        if not nets:
+            report["parse_error"] = "; ".join(parse_errors) if parse_errors else "parse_failed"
+            report["parse_status"] = "fail"
+            report["source_reason"] = "boardview_parse_failed"
             boardview_reports[board_id] = report
-            print(f"[boardview] parse failed: {selected} ({e})")
+            print(f"[boardview] parse failed: {selected_files[0]} ({report['parse_error']})")
             continue
-        parser_used = meta.get("format") or parser_used or "unknown"
+
+        parser_used = "+".join(sorted(set(formats))) if formats else (parser_used or "unknown")
         parser_id = _parser_id(parser_used)
-        meta.update(
-            {
-                "source": f"boardview_{parser_id}",
-                "source_path": selected,
-                "source_file": rel_source_file(selected),
-                "board_id": board_id,
-                "model": infer_model(selected) or "",
-            }
-        )
+        net_to_refs = {n: list(refs.values()) for n, refs in merged_refs.items()}
+        meta = {
+            "format": parser_used,
+            "source": f"boardview_{parser_id}",
+            "source_paths": selected_files,
+            "source_files": [rel_source_file(p) for p in selected_files],
+            "board_id": board_id,
+            "model": infer_model(selected_files[0]) or "",
+            "parse_status": parse_status,
+        }
+        if parse_errors:
+            meta["parse_error"] = "; ".join(parse_errors)
         boardview_cache_path = write_boardview_cache(board_id, nets, net_to_refs, meta)
         net_meta = dict(meta)
         net_meta["source"] = f"boardview_{parser_id}"
@@ -388,15 +494,38 @@ def main() -> None:
         net_meta["pp_net_count"] = len([n for n in nets if n.startswith("PP")])
         net_meta["signal_net_count"] = len([n for n in nets if not n.startswith("PP")])
         netlist_path = write_netlist_cache(board_id, nets, net_meta)
+        refs_pairs_count = sum(len(v) for v in net_to_refs.values())
         refs_meta = {
             "source": f"boardview_{parser_id}",
             "board_id": board_id,
             "model": infer_model(selected) or "",
             "net_count": len(net_to_refs),
-            "pairs_count": sum(len(v) for v in net_to_refs.values()),
+            "pairs_count": refs_pairs_count,
         }
         net_refs_path = write_net_refs_cache(board_id, net_to_refs, refs_meta)
-        components = meta.get("components") or sorted({r for refs in net_to_refs.values() for r in [d.get("refdes") for d in refs if d.get("refdes")]})
+        components = sorted(components) if components else meta.get("components") or sorted({r for refs in net_to_refs.values() for r in [d.get("refdes") for d in refs if d.get("refdes")]})
+        boardview_pairs = refs_pairs_count
+        if board_id in net_ref_texts and refs_pairs_count < 20:
+            known_nets = set(nets)
+            known_refdes = set(components)
+            text_refs, text_meta = build_net_refs_from_texts(
+                net_ref_texts.get(board_id, []),
+                known_nets,
+                known_refdes,
+            )
+            if text_meta.get("pairs_count", 0) > refs_pairs_count:
+                net_to_refs = text_refs
+                refs_meta = {
+                    "source": f"boardview_{parser_id}+kb_text",
+                    "source_reason": "boardview_partial_kb_text_refs",
+                    "board_id": board_id,
+                    "model": infer_model(selected) or "",
+                    "net_count": len(net_to_refs),
+                    "pairs_count": text_meta.get("pairs_count", 0),
+                    "boardview_pairs_count": boardview_pairs,
+                    "kb_text_pairs_count": text_meta.get("pairs_count", 0),
+                }
+                net_refs_path = write_net_refs_cache(board_id, net_to_refs, refs_meta)
         prefix_histogram: Dict[str, int] = {}
         for ref in components:
             if ref.startswith("FB"):
@@ -423,13 +552,17 @@ def main() -> None:
             f.write(json.dumps(comp_payload, indent=2))
         parse_status = meta.get("parse_status") or "success"
         report["parse_status"] = parse_status
+        if meta.get("parse_error"):
+            report["parse_error"] = meta.get("parse_error")
         if parse_status == "partial_success":
             report["source_reason"] = "boardview_partial"
         else:
             report["source_reason"] = "boardview_success"
         report["parser_used"] = parser_used
         report["counts"]["nets_count_from_boardview"] = len(nets)
-        report["counts"]["refs_pairs_count_from_boardview"] = refs_meta["pairs_count"]
+        report["counts"]["refs_pairs_count_from_boardview"] = boardview_pairs
+        if refs_meta.get("source_reason") == "boardview_partial_kb_text_refs":
+            report["counts"]["refs_pairs_count_from_kb_text"] = refs_meta.get("kb_text_pairs_count", 0)
         report["counts"]["components_count_from_boardview"] = len(components)
         report["outputs_written"]["netlist_path"] = netlist_path
         report["outputs_written"]["net_refs_path"] = net_refs_path
