@@ -104,8 +104,21 @@ facts. Preserve the old installation until migration is validated.
 a zip and offers it for download. Preview/OCR derivatives are disposable and are
 not included. To restore manually, quit BoardBrain, preserve the current data
 directory, and extract a trusted backup's `boardbrain-v2.sqlite3` and `files/`
-into an empty BoardBrain data directory. Re-import/retry photos or PDFs to rebuild
-derivatives. Never mix the backup database with unrelated old WAL/SHM files.
+into an empty BoardBrain data directory. Photo previews regenerate from originals
+when opened. OCR can be rerun if its disposable cache is needed. Never mix the
+backup database with unrelated old WAL/SHM files.
+
+## Verification recorded for this draft
+
+- 34 local Python tests passed; Python, JavaScript and shell syntax checks passed.
+- The local service was started in a fresh temporary data directory and its
+  authenticated state endpoint responded successfully without an API key.
+- The browser workflow test is provided but could not execute here: Chromium's
+  download failed. Native window layout/interaction has not been visually verified.
+- The first GitHub workflow run failed before any runner steps started; the Mac
+  build was skipped. Job logs were unavailable through the connector. No tested
+  `.app` artifact has been produced by that run.
+- Live model calls, Keychain behavior and actual shop boardviews are unverified.
 
 ## Primary references used
 

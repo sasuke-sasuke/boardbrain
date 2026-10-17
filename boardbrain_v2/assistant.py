@@ -279,7 +279,7 @@ class Assistant:
             if e["kind"] == "measurement":
                 d = e["data"]
                 latest[(d["target"], d["quantity"], d["power_state"], d["reference"], d["polarity"])] = e
-        observations = list(latest.values())[-100:]
+        observations = sorted(latest.values(), key=lambda e: e["created"])[-100:]
         history = [e for e in active if e["kind"] in ("message", "plan", "note", "outcome", "pin")][-24:]
         # Previous plans only need their concise proposed steps. Re-embedding their
         # evidence registries recursively would grow every successive request.
@@ -326,6 +326,8 @@ class Assistant:
                            "tools": tools, "parallel_tool_calls": False}
                 if research:
                     payload["include"] = ["web_search_call.action.sources"]
+                    if turn == 0:
+                        payload["tool_choice"] = {"type": "web_search"}
                 response = provider.respond(payload)
                 usage = response.get("usage")
                 if not isinstance(usage, dict) or not all(isinstance(usage.get(k), int) and usage[k] >= 0 for k in ("input_tokens", "output_tokens")):
