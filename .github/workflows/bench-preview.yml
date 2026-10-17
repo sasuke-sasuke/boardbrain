@@ -1,0 +1,55 @@
+name: BoardBrain bench preview
+on:
+  pull_request:
+    paths: ['boardbrain_v2/**', 'tests_v2/**', 'packaging/**', 'requirements-bench.txt', 'requirements-build.txt', '.github/workflows/bench-preview.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -r requirements-bench.txt
+      - run: python -m unittest discover -s tests_v2 -v
+      - run: python -m compileall -q boardbrain_v2
+      - run: node --check boardbrain_v2/static/app.js
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm install --no-save playwright
+      - run: npx playwright install --with-deps chromium
+      - name: Browser workflow with synthetic data
+        run: |
+          python -m boardbrain_v2 --serve --data-dir "$RUNNER_TEMP/bench-test" &
+          app_pid=$!
+          trap 'kill "$app_pid" 2>/dev/null || true' EXIT
+          python -c 'import pathlib,time,os; p=pathlib.Path(os.environ["RUNNER_TEMP"])/"bench-test/runtime.json"; deadline=time.monotonic()+15; exec("while not p.exists():\n if time.monotonic()>deadline: raise RuntimeError(\"server did not start\")\n time.sleep(.1)")'
+          node tests_v2/ui_smoke.cjs "$RUNNER_TEMP/bench-test/runtime.json" "$RUNNER_TEMP/bench-ui.png"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: Bench-UI-check
+          path: ${{ runner.temp }}/bench-ui.png
+  mac-app:
+    needs: verify
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          architecture: arm64
+      - run: python -m pip install -r requirements-build.txt
+      - run: python -m unittest discover -s tests_v2 -v
+      - run: bash packaging/build_macos.sh
+      - name: Packaged runtime smoke test
+        run: python tests_v2/smoke_packaged.py dist/BoardBrain.app/Contents/MacOS/BoardBrain
+      - uses: actions/upload-artifact@v4
+        with:
+          name: BoardBrain-macOS-arm64-preview
+          path: dist/BoardBrain-macOS-arm64-preview.zip
+          retention-days: 14

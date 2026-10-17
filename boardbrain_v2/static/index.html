@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>BoardBrain · Bench</title><link rel="stylesheet" href="/style.css"></head>
+<body>
+<aside class="sidebar">
+  <div class="brand"><span class="brand-icon" aria-hidden="true">⌘</span><div>BoardBrain<small>YOUR REPAIR BENCH</small></div></div>
+  <button id="new-case" class="primary wide">＋ New repair</button>
+  <label class="search-label"><span class="sr-only">Find a repair</span><input id="case-search" type="search" placeholder="Find a repair…"></label>
+  <div class="section-label">REPAIRS <span id="case-count">0</span></div>
+  <nav id="case-list" aria-label="Repair cases"></nav>
+  <div class="sidebar-bottom"><div id="budget"></div><button id="settings-button" class="quiet wide">Settings & equipment</button><div class="version">LOCAL WORKSPACE · <span id="version"></span></div></div>
+</aside>
+<main>
+  <header><div class="breadcrumb">WORKSPACE <span>/</span> <span id="workspace-label">Bench</span></div><div class="header-actions"><span id="connection">Connecting…</span><button id="backup" class="quiet">Back up</button><button id="quit" class="quiet">Quit</button></div></header>
+  <div id="notice" role="status" aria-live="polite" hidden></div>
+  <section id="welcome" class="welcome"><div class="eyebrow">LESS SEARCHING. MORE REPAIRING.</div><h1>A clearer next step.</h1><p>Bring the symptom, a photo, or a reading.<br>Keep the evidence and the repair together.</p><button id="welcome-new" class="primary">Start a repair <span>↗</span></button><div class="welcome-grid"><div><b>01</b><h3>Capture what you know</h3><p>Readings, photos, boardviews and notes, saved on this Mac.</p></div><div><b>02</b><h3>Choose the next test</h3><p>Short steps, visible sources and explicit gaps in the evidence.</p></div><div><b>03</b><h3>Keep the result</h3><p>Confirmed repairs become useful references for the next job.</p></div></div><p class="muted small">Preview · Board formats and AI guidance still need validation on your real repairs.</p></section>
+  <section id="case-workspace" hidden>
+    <div class="case-heading"><div><div id="case-meta" class="eyebrow"></div><h1 id="case-title"></h1><p id="case-symptom"></p></div><div class="case-actions"><span id="case-status" class="pill"></span><button id="edit-case" class="quiet">Edit details</button><button id="outcome" class="quiet">Record outcome</button></div></div>
+    <div class="workspace-nav"><div class="tabs" role="tablist" aria-label="Repair workspace"><button data-tab="bench" class="active" role="tab" aria-selected="true">Bench</button><button data-tab="files" role="tab" aria-selected="false">Files & photos <span id="file-count">0</span></button><button data-tab="history" role="tab" aria-selected="false">Timeline</button></div><button id="export-case" class="quiet small">Export case</button></div>
+    <div id="jobs" aria-live="polite"></div>
+    <div id="bench-tab" class="tab-panel">
+      <div class="bench-grid"><section class="main-column"><div class="section-label">NEXT USEFUL TEST</div><div id="plan"></div><div id="hypotheses"></div><div class="composer"><label for="question">What are you seeing?</label><textarea id="question" rows="3" placeholder="Describe the symptom, ask about a reading, or tell me what changed…"></textarea><div id="photo-selection"></div><div class="composer-footer"><label class="check"><input id="research" type="checkbox"> Research online</label><button id="ask" class="primary">Find the next step <span>↑</span></button></div><div class="microcopy">Only this case’s selected context and checked photos are sent when you ask.</div></div></section>
+      <aside class="evidence-column"><div class="section-label">AT THE BENCH</div><div class="capture-actions"><button id="add-reading" class="secondary">＋ Record reading</button><button id="add-note" class="quiet">＋ Add observation</button><button id="add-pin" class="quiet">＋ Checked pin mapping</button></div><section class="panel"><h3>Latest readings</h3><div id="readings"></div></section><section class="panel"><h3>Find a net or component</h3><form id="lookup-form"><div class="inline"><input id="lookup-query" placeholder="Exact net, U7000 or U7000.1" aria-label="Evidence search"><button class="secondary" type="submit">↗</button></div></form><div id="lookup-results" class="lookup-results"><p class="muted small">Search this repair’s evidence. Exact punctuation is preserved.</p></div></section><button id="find-cases" class="quiet wide">Find confirmed repairs</button></aside></div>
+    </div>
+    <div id="files-tab" class="tab-panel" hidden><div class="files-heading"><div><h2>Evidence for this repair</h2><p class="muted">Original files stay saved. Import status tells you what the assistant can use.</p></div><button id="upload-button" class="primary">＋ Add files or photos</button></div><div id="source-list"></div></div>
+    <div id="history-tab" class="tab-panel" hidden><div class="files-heading"><div><h2>Repair timeline</h2><p class="muted">Your observations, questions and results. Corrections keep their history.</p></div></div><div id="timeline"></div></div>
+  </section>
+</main>
+<dialog id="modal"><div class="dialog-header"><h2 id="modal-title"></h2><button id="close-modal" class="quiet" aria-label="Close dialog">✕</button></div><div id="modal-content"></div><div id="modal-error" role="alert" hidden></div></dialog>
+<script src="/app.js"></script>
+</body></html>

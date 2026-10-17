@@ -1,7 +1,15 @@
 .env
+.env.*
 .venv/
+.venv-bench/
 __pycache__/
 *.pyc
 .DS_Store
 data/
 kb_raw/
+dist/
+build/
+*.spec
+node_modules/
+test-results/
+playwright-report/

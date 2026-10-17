@@ -1,0 +1,250 @@
+'use strict';
+const $ = s => document.querySelector(s);
+const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const token = location.hash.slice(1) || sessionStorage.getItem('bb-token') || '';
+sessionStorage.setItem('bb-token', token);
+history.replaceState(null, '', location.pathname);
+let state = null, current = null, tab = 'bench', evidence = {}, seenJobs = new Map(), pendingQuestions = new Map(), refreshing = false, blobURLs = [], lastCaseSignature = '';
+const selectedPhotos = new Set();
+const dismissedJobs = new Set();
+const units = {voltage:'V',resistance:'Ω',diode:'V',current:'A',frequency:'Hz',continuity:''};
+const powerLabel = p => ({unpowered:'Unpowered',standby:'Standby',attempting_boot:'Attempting boot',running:'Running',unknown:'State unknown'}[p] || p);
+const date = value => new Date(value).toLocaleString([], {month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'});
+function notice(text) { $('#notice').textContent = text; $('#notice').hidden = !text; }
+async function api(path, data) {
+  const response = await fetch(path, {method:data===undefined?'GET':'POST',headers:{Authorization:`Bearer ${token}`,...(data===undefined?{}:{'Content-Type':'application/json'})},body:data===undefined?undefined:JSON.stringify(data)});
+  const result = await response.json();
+  if (!response.ok) throw Error(result.error || 'The request did not finish. Your saved data is still here.');
+  return result;
+}
+async function binary(path) {
+  const response = await fetch(path, {headers:{Authorization:`Bearer ${token}`}});
+  if(!response.ok) throw Error((await response.json()).error);
+  return response.blob();
+}
+function urlFor(blob) { const url = URL.createObjectURL(blob); blobURLs.push(url); return url; }
+function closeModal() { $('#modal').close(); blobURLs.forEach(URL.revokeObjectURL); blobURLs = []; }
+function modal(title, html, setup) {
+  $('#modal-title').textContent = title; $('#modal-content').innerHTML = html;
+  $('#modal-error').hidden = true;
+  if (!$('#modal').open) $('#modal').showModal();
+  if(setup) setup();
+  const form = $('#modal form');
+  if(form) form.addEventListener('submit', event => event.preventDefault());
+}
+function formAction(form, fn) {
+  form.addEventListener('submit', async event => {
+    event.preventDefault(); const button = form.querySelector('[type=submit]'); if(button) button.disabled = true;
+    $('#modal-error').hidden = true;
+    try { await fn(new FormData(form)); }
+    catch(error) { $('#modal-error').textContent = error.message; $('#modal-error').hidden = false; }
+    finally { if(button) button.disabled = false; }
+  });
+}
+function field(name,label,value='',extra='') { return `<label class="field">${esc(label)}<input name="${name}" value="${esc(value)}" ${extra}></label>`; }
+function footer(text) { return `<div class="form-footer"><button type="submit" class="primary">${text}</button></div>`; }
+function caseId() { if(!current) throw Error('Open a repair first.'); return current.id; }
+function draftSave() { if(current) sessionStorage.setItem(`bb-draft-${current.id}`, $('#question').value); }
+async function loadCase(id) {
+  draftSave(); current = await api('/api/case?id='+encodeURIComponent(id));
+  sessionStorage.setItem('bb-case', id); selectedPhotos.clear(); evidence={}; lastCaseSignature='';
+  $('#question').value = sessionStorage.getItem(`bb-draft-${id}`) || '';
+  $('#lookup-results').innerHTML = '<p class="muted small">Search this repair’s evidence. Exact punctuation is preserved.</p>';
+  render();
+}
+async function refresh() {
+  if(refreshing) return;
+  refreshing = true;
+  try {
+    state = await api('/api/state');
+    if(current) {
+      const updated = state.cases.find(c=>c.id===current.id);
+      if(updated && (updated.updated!==current.updated || state.jobs.some(j=>j.case_id===current.id && ['queued','running','stopping'].includes(j.status)))) current = await api('/api/case?id='+current.id);
+    }
+    for(const job of state.jobs) {
+      if(seenJobs.get(job.id) !== job.status && ['complete','failed','cancelled'].includes(job.status)) {
+        if(job.case_id===current?.id) current = await api('/api/case?id='+current.id);
+        if(job.status==='failed') notice(job.message);
+        const pending = pendingQuestions.get(job.id);
+        if(pending && job.status==='complete') {
+          if(current?.id===pending.caseId && $('#question').value===pending.text) $('#question').value='';
+          sessionStorage.removeItem(`bb-draft-${pending.caseId}`); selectedPhotos.clear();
+        }
+        pendingQuestions.delete(job.id);
+      }
+      seenJobs.set(job.id,job.status);
+    }
+    render();
+  } catch(error) { $('#connection').textContent='Connection lost'; notice(error.message); }
+  finally { refreshing=false; }
+}
+function render() {
+  if(!state) return;
+  $('#version').textContent=state.version;
+  $('#connection').textContent=state.has_api_key?'AI configured · Local cases':'Local mode · AI setup needed';
+  const u=state.usage;
+  $('#budget').innerHTML=`<strong>$${u.estimated_cost.toFixed(2)}</strong> / $${Number(u.limit).toFixed(0)} this month<div class="meter"><progress max="${esc(u.limit)}" value="${esc(Math.min(u.limit,u.estimated_cost+u.reserved))}"></progress></div><span>${u.reserved?`$${u.reserved.toFixed(2)} reserved for a running call`:(u.estimated_cost>=u.warning_at?'Usage warning threshold reached':'Estimated AI usage · app limit')}</span>`;
+  const query=$('#case-search').value.toLowerCase();
+  const cases=state.cases.filter(c=>`${c.title} ${c.board_id} ${c.symptom}`.toLowerCase().includes(query));
+  $('#case-count').textContent=state.cases.length;
+  $('#case-list').innerHTML=cases.map(c=>`<button class="case-link ${current?.id===c.id?'active':''}" data-case="${c.id}"><strong>${esc(c.title)}</strong><small><span>${esc(c.board_id||c.device||'Board not identified')}</span><span>${c.status==='confirmed'?'✓ Fixed':c.status==='unresolved'?'Unresolved':'Open'}</span></small></button>`).join('') || '<p class="muted small">No repairs here yet.</p>';
+  $('#welcome').hidden=!!current; $('#case-workspace').hidden=!current;
+  if(!current) return;
+  $('#case-title').textContent=current.title; $('#case-symptom').textContent=current.symptom;
+  $('#case-meta').textContent=[current.device||'REPAIR',current.board_id||'BOARD UNKNOWN',current.revision?`REV ${current.revision}`:'REVISION UNKNOWN'].join('  /  ');
+  $('#case-status').textContent=current.status==='confirmed'?'Repair confirmed':current.status;
+  $('#outcome').textContent=current.status==='open'?'Record outcome':'Reopen repair';
+  $('#workspace-label').textContent=current.title;
+  $('#file-count').textContent=current.sources.length;
+  $('#ask').disabled=current.status!=='open'||state.jobs.some(j=>j.kind==='assistant'&&['queued','running','stopping'].includes(j.status));
+  for(const id of ['add-reading','add-note','add-pin','upload-button']) $('#'+id).disabled=current.status!=='open';
+  const jobs=state.jobs.filter(j=>!dismissedJobs.has(j.id)&&j.case_id===current.id&&['queued','running','stopping','failed'].includes(j.status));
+  $('#jobs').innerHTML=jobs.slice(-3).map(j=>`<div class="job ${j.status==='failed'?'failed':''}"><span>${esc(j.kind==='assistant'?'Assistant':'File import')} · ${esc(j.message)}</span>${j.status==='failed'?`<button class="quiet" data-dismiss="${j.id}">Dismiss</button>`:`<button class="quiet" data-cancel="${j.id}">Stop</button>`}</div>`).join('');
+  const signature=JSON.stringify([current.id,current.updated,state.has_api_key,current.sources.map(s=>[s.id,s.status])]);
+  if(signature!==lastCaseSignature){renderPlan(); renderReadings(); renderFiles(); renderTimeline();lastCaseSignature=signature;}
+  $('#photo-selection').innerHTML=current.sources.filter(s=>s.role==='photo'&&s.status==='ready').map(s=>`<label class="photo-choice"><input type="checkbox" data-photo="${s.id}" ${selectedPhotos.has(s.id)?'checked':''}>${esc(s.name)}</label>`).join('');
+  for(const name of ['bench','files','history']) {
+    $('#'+name+'-tab').hidden=tab!==name;
+    const button=$(`[data-tab="${name}"]`); button.classList.toggle('active',tab===name);button.setAttribute('aria-selected',String(tab===name));
+  }
+}
+function currentPlan() { return current.events.filter(e=>e.kind==='plan').at(-1); }
+function completed(test, planEvent) {
+  return current.events.some(e=>e.kind==='measurement'&&!e.retracted&&e.created>planEvent.created&&e.data.target===test.target&&e.data.quantity===test.quantity&&e.data.power_state===test.power_state&&e.data.reference===test.reference&&test.reference&&e.data.power_state!=='unknown'&&!e.data.warnings?.length&&(test.quantity!=='diode'||(e.data.polarity===test.polarity&&test.polarity)));
+}
+function renderPlan() {
+  const event=currentPlan(); evidence={...evidence,...(event?.data.evidence||{})};
+  if(!event) {
+    $('#plan').innerHTML=`<div class="empty-plan"><h2>Let’s establish the starting point.</h2><p>Record what you’ve already checked, then ask for the next test. Add the boardview or a clear photo whenever you have one.</p><div class="small">${state.has_api_key?'Your observations stay saved between sessions.':'You can start saving evidence now. Add your API key in Settings for AI guidance.'}</div></div>`;
+    $('#hypotheses').innerHTML=''; return;
+  }
+  const plan=event.data.plan, stale=event.data.stale||current.updated>event.created;
+  $('#plan').innerHTML=(stale?'<div class="warning">This plan predates a case update. Completed readings are shown below; ask for an update before following an old next step.</div>':'')+plan.tests.map((t,i)=>{
+    const done=completed(t,event);
+    return `<article class="next-test"><div class="test-heading"><span class="step-number">${done?'✓':String(i+1).padStart(2,'0')}</span><h2>${esc(t.title)}</h2></div><div class="test-facts"><span>${esc(t.quantity)}</span>${t.target?`<span>${esc(t.target)}</span>`:''}<span>${esc(powerLabel(t.power_state))}</span></div><p class="procedure">${esc(t.procedure)}</p>${t.reference?`<p class="small">Reference: ${esc(t.reference)}${t.polarity?` · ${esc(t.polarity)}`:''}</p>`:''}<details class="test-details"><summary>Why this test & what it tells us</summary><p>${esc(t.why)}</p><p>${esc(t.interpretation)}</p><p>${t.expected_quote?`Source excerpt: “${esc(t.expected_quote)}”`:'No verified numeric expected value is attached to this test.'}</p>${t.stop_if?`<p>Stop if: ${esc(t.stop_if)}</p>`:''}${[t.pin_evidence_id,t.expected_evidence_id,...t.evidence_ids].filter((x,i,a)=>x&&a.indexOf(x)===i).map(x=>`<button class="source-chip" data-evidence="${esc(x)}">${esc(x)}</button>`).join('')}</details>${t.quantity!=='observation'?`<button class="${done?'quiet':'secondary'}" data-test="${i}" ${stale&&!done?'disabled':''}>${done?'Reading recorded':'Record this reading'}</button>`:''}</article>`;
+  }).join('')+`<div class="summary">${esc(plan.summary)}</div>`+(plan.questions.length?`<div class="questions"><h3>To narrow this down</h3>${plan.questions.map(q=>`<p>${esc(q)}</p>`).join('')}</div>`:'');
+  $('#hypotheses').innerHTML=(plan.hypotheses.length?`<div class="hypotheses"><div class="section-label">WORKING HYPOTHESES</div>${plan.hypotheses.map(h=>`<div class="hypothesis">${esc(h.idea)}<br><span>Support: ${h.support.length} sources · Contradictions: ${h.contradictions.length}</span>${[...h.support,...h.contradictions].filter((x,i,a)=>a.indexOf(x)===i).map(x=>`<button class="source-chip" data-evidence="${esc(x)}">${esc(x)}</button>`).join('')}</div>`).join('')}</div>`:'')+(plan.web_sources.length?`<div class="panel"><h3>Research references · verify applicability</h3>${plan.web_sources.map(s=>`<p class="small"><a href="${esc(s.url)}" target="_blank" rel="noreferrer noopener">${esc(s.title||s.url)} ↗</a></p>`).join('')}</div>`:'');
+}
+function readingLabel(d) { return `${d.value} ${d.unit}`.trim(); }
+function renderReadings() {
+  const readings=current.events.filter(e=>e.kind==='measurement'&&!e.retracted).slice(-6).reverse();
+  $('#readings').innerHTML=readings.map(e=>`<div class="reading"><div class="reading-top"><span>${esc(e.data.target)}</span><b>${esc(readingLabel(e.data))}</b></div><small>${esc(e.data.quantity)} · ${esc(powerLabel(e.data.power_state))}${e.data.warnings?.length?' · Needs context':''}</small></div>`).join('')||'<p class="muted small">No readings yet. Every saved reading includes its mode and conditions.</p>';
+}
+function renderFiles() {
+  $('#source-list').innerHTML=current.sources.map(s=>`<article class="source-row"><div><h3>${esc(s.name)}</h3><span class="pill ${['unsupported','invalid','partial','interrupted'].includes(s.status)?'warn':'dim'}">${esc(s.status)}</span> <span class="small muted">${esc(s.role)} · ${s.scope_confirmed?'Board/revision matched':'Board scope unconfirmed'}</span><p>${esc(s.info.message||'Waiting for import')}</p></div><div class="source-controls">${s.role==='photo'&&s.status==='ready'?`<button class="quiet" data-view-photo="${s.id}">View photo</button>`:''}${s.name.toLowerCase().endsWith('.pdf')?`<button class="quiet" data-view-pdf="${s.id}">View pages</button>`:''}<button class="quiet" data-scope="${s.id}">Check scope</button><button class="quiet" data-open-source="${s.id}">Open on Mac</button><button class="quiet" data-download="${s.id}">Save file</button>${['invalid','interrupted','partial','unsupported'].includes(s.status)?`<button class="quiet" data-retry="${s.id}">${s.status==='partial'?'OCR pages':'Retry import'}</button>`:''}</div></article>`).join('')||'<div class="empty-plan"><h2>No files? We can still start.</h2><p>Record the symptom and observations. Add a clear photo, then check component markings and test points as you go.</p></div>';
+}
+function renderTimeline() {
+  $('#timeline').innerHTML=[...current.events].reverse().map(e=>{
+    let title=e.kind, body=''; const d=e.data;
+    if(e.kind==='measurement'){title=`${d.target} · ${readingLabel(d)}`;body=`${d.quantity} · ${powerLabel(d.power_state)}\nReference: ${d.reference||'Not recorded'}${d.polarity?' · '+d.polarity:''}\n${d.note||''}${d.warnings?.length?'\n'+d.warnings.join('\n'):''}`;}
+    else if(e.kind==='message'){title='You asked';body=d.text;}
+    else if(e.kind==='note'){title='Observation';body=d.text;}
+    else if(e.kind==='pin'){title=`Checked mapping · ${d.ref}.${d.pin} → ${d.net}`;body=d.basis;}
+    else if(e.kind==='plan'){title='Assistant plan';body=d.plan.summary;}
+    else if(e.kind==='outcome'){title=d.status==='confirmed'?'Repair confirmed':d.status==='open'?'Repair reopened':'Repair unresolved';body=d.status==='confirmed'?`Fix: ${d.fix}\nVerification: ${d.verification}\nRoot cause: ${d.cause_status}${d.root_cause?' — '+d.root_cause:''}`:d.reason||'';}
+    return `<article class="timeline-item ${e.retracted?'retracted':''}"><div class="stamp">${esc(date(e.created))}${e.retracted?' · Retracted':''}</div><h3>${esc(title)}</h3><p>${esc(body)}</p>${['measurement','note','pin'].includes(e.kind)&&!e.retracted&&current.status==='open'?`<button class="quiet small" data-retract="${e.id}">Retract incorrect entry</button>`:''}</article>`;
+  }).join('')||'<p class="muted">The first observation starts your timeline.</p>';
+}
+function newCase() {
+  modal('Start a repair',`<form id="new-form"><div class="fields"><div class="full">${field('title','Repair title','','required maxlength="120" placeholder="MacBook — no power"')}</div>${field('device','Device / model','','placeholder="MacBook Pro A…"')}${field('board_id','Board number','','placeholder="820-…"')}${field('revision','Board revision','','placeholder="Leave blank if unknown"')}<label class="field full">Symptom<textarea name="symptom" required maxlength="4000" placeholder="What happens when power is connected? What have you already tried?"></textarea></label></div>${footer('Open repair')}</form>`,()=>formAction($('#new-form'),async form=>{
+    const created=await api('/api/cases',Object.fromEntries(form));closeModal();await refresh();await loadCase(created.id);
+  }));
+}
+function editCase() {
+  modal('Repair details',`<form id="edit-form"><div class="fields"><div class="full">${field('title','Repair title',current.title,'required maxlength="120"')}</div>${field('device','Device / model',current.device)}${field('board_id','Board number',current.board_id)}${field('revision','Board revision',current.revision)}<label class="field full">Symptom<textarea name="symptom" required>${esc(current.symptom)}</textarea></label></div><p class="modal-copy form-gap">Changing the board number or revision resets file scope checks and retracts checked pin mappings. Recheck them against the corrected board identity.</p>${footer('Save details')}</form>`,()=>formAction($('#edit-form'),async form=>{await api('/api/case-details',{case_id:caseId(),...Object.fromEntries(form)});closeModal();await refresh();}));
+}
+function settings() {
+  const s=state.settings;
+  modal('Settings & equipment',`<form id="settings-form"><p class="modal-copy">Cases and files are stored on this Mac. AI requests use your OpenAI API account. Your key is saved in macOS Keychain.</p><div class="fields"><label class="field full">OpenAI API key<input name="api_key" type="password" autocomplete="new-password" placeholder="${state.has_api_key?'Key saved · leave blank to keep it':'sk-…'}"><span class="hint">Never included in case exports or backups.</span></label><label class="field full">Assistant model<select name="model"><option value="gpt-6.1-sol" ${s.model==='gpt-6.1-sol'?'selected':''}>GPT-6.1 Sol</option><option value="gpt-5.4" ${s.model==='gpt-5.4'?'selected':''}>GPT-5.4</option></select><span class="hint">Account access and repair performance still need validation.</span></label>${field('monthly_limit','Monthly app limit ($)',s.monthly_limit,'type="number" min="1" max="1000" required')}${field('warning_at','Warn at ($)',s.warning_at,'type="number" min="0" required')}<label class="field full">Your bench equipment<textarea name="equipment" rows="5" required>${esc(s.equipment)}</textarea><span class="hint">Add the exact scope, probes and logic-analyzer models when available.</span></label>${field('flexbv_version','FlexBV version',s.flexbv_version,'required')}</div><p class="modal-copy form-gap">Usage is a conservative app estimate, not your provider’s invoice. A request temporarily reserves $3; unused reservation is released when billing details arrive. An interrupted connection keeps the reservation as an uncertain charge. Other apps using the same key are not counted.</p>${footer('Save settings')}</form>`,()=>formAction($('#settings-form'),async form=>{
+    const data=Object.fromEntries(form);data.monthly_limit=Number(data.monthly_limit);data.warning_at=Number(data.warning_at);await api('/api/settings',data);closeModal();await refresh();notice('Settings saved.');
+  }));
+}
+function addReading(test=null) {
+  const d=test||{target:'',quantity:'voltage',power_state:'unknown',reference:'',polarity:''};
+  modal('Record a reading',`<form id="reading-form"><label class="field">Quick entry<div class="inline form-gap"><input id="quick-reading" placeholder="PP3V3 = 3.28 V" aria-label="Quick reading"><button id="parse-reading" type="button" class="quiet">Fill fields</button></div><span class="hint">Also accepts U7000.1 = 12 kΩ or USB_D+ = diode 0.42 V. Review the fields before saving.</span></label><div class="fields form-gap">${field('target','Net, pin or physical point',d.target,'required')}<label class="field">Measurement type<select name="quantity">${Object.keys(units).map(q=>`<option value="${q}" ${q===d.quantity?'selected':''}>${q}</option>`).join('')}</select></label>${field('value','Reading (base unit; OL or PASS/FAIL)', '', 'required placeholder="0.00"')}<label class="field">Power state<select name="power_state">${['unknown','unpowered','standby','attempting_boot','running'].map(p=>`<option value="${p}" ${p===d.power_state?'selected':''}>${powerLabel(p)}</option>`).join('')}</select></label>${field('reference','Probe reference / return',d.reference,'placeholder="Board ground"')}${field('polarity','Probe polarity (required for diode)',d.polarity,'placeholder="Red on ground, black on target"')}<label class="field full">Observation / conditions<textarea name="note" rows="2" placeholder="Battery disconnected, adapter attached, meter range…"></textarea></label></div><p id="reading-unit" class="modal-copy form-gap">Store this reading in ${esc(units[d.quantity]||'PASS / FAIL')}. Do not measure resistance, diode or continuity on a powered board.</p><input type="hidden" name="raw" value="">${footer('Save reading')}</form>`,()=>{
+    const form=$('#reading-form');
+    form.elements.quantity.addEventListener('change',()=>$('#reading-unit').textContent=`Store this reading in ${units[form.elements.quantity.value]||'PASS / FAIL'}. Record the actual conditions; do not guess.`);
+    $('#parse-reading').onclick=async()=>{try{const parsed=await api('/api/parse-reading',{text:$('#quick-reading').value});for(const k of ['target','quantity','value','raw']) form.elements[k].value=parsed[k];form.elements.quantity.dispatchEvent(new Event('change'));$('#modal-error').hidden=true;}catch(e){$('#modal-error').textContent=e.message;$('#modal-error').hidden=false;}};
+    formAction(form,async values=>{const data=Object.fromEntries(values);data.unit=units[data.quantity];const saved=await api('/api/observations',{case_id:caseId(),kind:'measurement',data});closeModal();await refresh();notice(saved.data.warnings.length?'Reading saved. '+saved.data.warnings.join(' '):'Reading saved.');});
+  });
+}
+function addNote() {
+  modal('Add an observation',`<form id="note-form"><label class="field">What did you observe?<textarea name="text" rows="6" required placeholder="Visual damage, startup behavior, a test result or a correction…"></textarea></label>${footer('Save observation')}</form>`,()=>formAction($('#note-form'),async form=>{await api('/api/observations',{case_id:caseId(),kind:'note',data:Object.fromEntries(form)});closeModal();await refresh();}));
+}
+function addPin() {
+  modal('Record a checked pin mapping',`<form id="pin-form"><p class="modal-copy">Use a mapping you have checked in the matching FlexBV boardview or established by continuity. Preserve the exact net name.</p><div class="fields">${field('ref','Component','','required placeholder="U7000"')}${field('pin','Pin number','','required placeholder="1"')}<div class="full">${field('net','Exact net name','','required placeholder="USB_D+"')}</div><label class="field full">How did you verify it?<textarea name="basis" required placeholder="Board number/revision, FlexBV component and pin, or continuity test conditions…"></textarea></label><label class="check full"><input name="confirmed" type="checkbox" required> I checked this mapping on the board being repaired.</label></div>${footer('Save checked mapping')}</form>`,()=>formAction($('#pin-form'),async form=>{const data=Object.fromEntries(form);data.confirmed=form.has('confirmed');await api('/api/observations',{case_id:caseId(),kind:'pin',data});closeModal();await refresh();}));
+}
+function outcome() {
+  if(current.status!=='open') return api('/api/outcome',{case_id:caseId(),status:'open'}).then(refresh).catch(e=>notice(e.message));
+  modal('Record the outcome',`<form id="outcome-form"><label class="field">Result<select name="status"><option value="confirmed">Repair confirmed</option><option value="unresolved">Unresolved / not economical</option></select></label><div id="confirmed-fields" class="fields form-gap"><label class="field full">What fixed it?<textarea name="fix" placeholder="Actual repair performed"></textarea></label><label class="field full">Post-repair verification<textarea name="verification" placeholder="Measurements, boot tests, charging, load and soak testing…"></textarea></label><label class="field full">Root cause certainty<select name="cause_status"><option value="unknown">Root cause still unknown</option><option value="suspected">Suspected cause</option><option value="verified">Cause verified with evidence</option></select></label><label class="field full">Root cause / supporting evidence<textarea name="root_cause"></textarea></label><label class="check full"><input name="technician_confirmed" type="checkbox"> I verified this repair worked.</label></div><label id="unresolved-fields" class="field form-gap" hidden>Reason / last known state<textarea name="reason"></textarea></label><p class="modal-copy form-gap">Confirmed cases are searchable references. Saving a case does not automatically train a model.</p>${footer('Save outcome')}</form>`,()=>{
+    const f=$('#outcome-form');f.elements.status.onchange=()=>{$('#confirmed-fields').hidden=f.elements.status.value!=='confirmed';$('#unresolved-fields').hidden=f.elements.status.value==='confirmed';};
+    formAction(f,async values=>{const data=Object.fromEntries(values);data.technician_confirmed=values.has('technician_confirmed');await api('/api/outcome',{case_id:caseId(),...data});closeModal();await refresh();});
+  });
+}
+function upload() {
+  const scoped=!!(current.board_id&&current.revision);
+  modal('Add evidence',`<form id="upload-form"><div class="fields"><label class="field full">File type<select name="role"><option value="photo">Board / microscope photo</option><option value="boardview">Boardview</option><option value="schematic">Schematic PDF</option><option value="reference">Datasheet / reference PDF</option></select></label><label class="field full">Choose files<input name="files" type="file" multiple required><span class="hint">Up to 25 MB each. HEIC, JPEG, PNG, PDF and boardview files can be retained.</span></label><label class="check full"><input name="scope_confirmed" type="checkbox" ${scoped?'':'disabled'}> These files match ${esc(current.board_id||'the board')} / ${esc(current.revision||'revision unknown')}.</label></div><p class="modal-copy form-gap">${scoped?'Confirm the file’s actual board revision, not just a similar model.':'Without a known board number and revision, imported mappings remain unconfirmed. You can record specific checked pin mappings separately.'} Supported connectivity in this preview: plain BVRAW_FORMAT_3 and the documented ref,pin,net CSV format. Other formats remain available in FlexBV until their adapters are validated.</p>${footer('Import files')}</form>`,()=>formAction($('#upload-form'),async form=>{
+    const files=form.getAll('files');const id=caseId();
+    for(const file of files){if(!file.size||file.size>25*1024*1024) throw Error(`${file.name}: choose a non-empty file up to 25 MB.`);const content=await new Promise((resolve,reject)=>{const r=new FileReader();r.onload=()=>resolve(String(r.result).split(',')[1]);r.onerror=()=>reject(Error('File could not be read'));r.readAsDataURL(file);});await api('/api/upload',{case_id:id,filename:file.name,role:form.get('role'),scope_confirmed:form.has('scope_confirmed'),content});}
+    closeModal();await refresh();notice('Files saved. Imports are running in the background.');
+  }));
+}
+async function showPhoto(id) {
+  const source=current.sources.find(s=>s.id===id);const blob=await binary(`/api/photo?case_id=${caseId()}&id=${id}`);
+  modal(source.name,`<img class="photo-preview" src="${urlFor(blob)}" alt="Uploaded board photo">`);
+}
+async function showPDF(id,page=1) {
+  const source=current.sources.find(s=>s.id===id);
+  modal(source.name,`<form id="page-form" class="inline"><input name="page" type="number" value="${page}" min="1" max="${source.info.pages||1500}" aria-label="Page number"><button class="secondary" type="submit">View page</button></form><p class="modal-copy form-gap">Compare text with the original drawing; OCR alone does not establish connectivity.</p><div id="page-image" class="muted">Loading page…</div>`,()=>formAction($('#page-form'),async form=>showPDF(id,Number(form.get('page')))));
+  const blob=await binary(`/api/page?case_id=${caseId()}&id=${id}&page=${page}`);
+  if($('#page-image')) $('#page-image').innerHTML=`<img class="document-preview" src="${urlFor(blob)}" alt="Document page ${page}">`;
+}
+async function showEvidence(id) {
+  const e=evidence[id];if(!e) throw Error('Evidence is no longer in the current view. Search it again.');
+  if(e.kind==='document'&&e.source_id) return showPDF(e.source_id,e.data.page);
+  if(e.kind==='photo') return showPhoto(e.id);
+  modal('Evidence · '+id,`<p class="modal-copy">${esc(e.name||'Recorded case observation')}${e.conflict?' · CONFLICT: check this mapping before use':''}</p><pre class="evidence-json">${esc(JSON.stringify(e.data,null,2))}</pre>`);
+}
+async function lookup(event) {
+  event.preventDefault();const q=$('#lookup-query').value.trim();if(!q)return;
+  try{
+    const found=await api(`/api/lookup?case_id=${caseId()}&q=${encodeURIComponent(q)}`);found.forEach(e=>evidence[e.id]=e);
+    $('#lookup-results').innerHTML=found.map(e=>`<div class="lookup-row"><b>${esc(e.kind==='pin'?`${e.data.ref}.${e.data.pin} → ${e.data.net}`:e.name||e.kind)}</b><p>${esc(e.kind==='pin'?(e.conflict?'Conflicting mappings — do not use':e.scope_confirmed?'Board scope checked':'Board/revision unconfirmed'):e.data.text?.slice(0,260)||JSON.stringify(e.data))}</p><button class="source-chip" data-evidence="${e.id}">${e.kind==='document'?`Page ${e.data.page} · ${esc(e.data.method)}`:'View evidence'}</button></div>`).join('')||'<p class="muted small">No matching evidence in this case. Check spelling, including +, − and #. Add a checked mapping if needed.</p>';
+  }catch(e){notice(e.message);}
+}
+async function ask() {
+  const text=$('#question').value.trim();if(!text){$('#question').focus();return;}
+  try {draftSave();const id=caseId();const job=await api('/api/ask',{case_id:id,question:text,photo_ids:[...selectedPhotos],research:$('#research').checked});pendingQuestions.set(job.id,{caseId:id,text});notice('');await refresh();}
+  catch(e){notice(e.message);}
+}
+async function download(blob,name){const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}
+document.addEventListener('click',async event=>{
+  const b=event.target.closest('button');if(!b)return;
+  try{
+    if(b.dataset.case) await loadCase(b.dataset.case);
+    if(b.dataset.dismiss){dismissedJobs.add(b.dataset.dismiss);render();}
+    if(b.dataset.tab){tab=b.dataset.tab;render();}
+    if(b.dataset.test) addReading(currentPlan().data.plan.tests[Number(b.dataset.test)]);
+    if(b.dataset.evidence) await showEvidence(b.dataset.evidence);
+    if(b.dataset.cancel){await api('/api/cancel',{id:b.dataset.cancel});await refresh();}
+    if(b.dataset.retract){await api('/api/retract',{case_id:caseId(),event_id:b.dataset.retract});await refresh();notice('Entry retracted. The original remains in the timeline.');}
+    if(b.dataset.viewPhoto) await showPhoto(b.dataset.viewPhoto);
+    if(b.dataset.viewPdf) await showPDF(b.dataset.viewPdf);
+    if(b.dataset.openSource){await api('/api/open-source',{case_id:caseId(),source_id:b.dataset.openSource});notice('Opened in the Mac viewer.');}
+    if(b.dataset.download){const s=current.sources.find(s=>s.id===b.dataset.download);await download(await binary(`/api/file?case_id=${caseId()}&id=${s.id}`),s.name);}
+    if(b.dataset.scope){const s=current.sources.find(s=>s.id===b.dataset.scope);modal('Confirm file scope',`<form id="scope-form"><p class="modal-copy">File: ${esc(s.name)}<br>Current board: ${esc(current.board_id||'unknown')} / ${esc(current.revision||'unknown')}</p><label class="check"><input name="confirmed" type="checkbox" ${s.scope_confirmed?'checked':''}> I checked that this file matches this board and revision.</label>${footer('Save scope check')}</form>`,()=>formAction($('#scope-form'),async form=>{await api('/api/source-scope',{case_id:caseId(),source_id:s.id,confirmed:form.has('confirmed')});closeModal();await refresh();}));}
+    if(b.dataset.retry){const s=current.sources.find(s=>s.id===b.dataset.retry);if(s.status==='partial'){modal('OCR selected pages',`<form id="ocr-form"><p class="modal-copy">Pages without searchable text: ${esc((s.info.image_only_pages||[]).slice(0,30).join(', '))}. Choose up to 10 per request. Tesseract must be available on this Mac; if it is missing, the original page viewer still works.</p>${field('pages','Page numbers','','required placeholder="1, 2, 3"')}${footer('Run OCR')}</form>`,()=>formAction($('#ocr-form'),async form=>{const pages=String(form.get('pages')).split(',').map(x=>Number(x.trim()));await api('/api/retry-import',{case_id:caseId(),source_id:s.id,ocr_pages:pages});closeModal();await refresh();}));}else{await api('/api/retry-import',{case_id:caseId(),source_id:s.id});await refresh();}}
+  }catch(e){notice(e.message);}
+});
+document.addEventListener('change',event=>{const id=event.target.dataset.photo;if(id){if(event.target.checked&&selectedPhotos.size>=2){event.target.checked=false;notice('Choose up to two photos for one question.');return;}event.target.checked?selectedPhotos.add(id):selectedPhotos.delete(id);}});
+$('#new-case').onclick=newCase;$('#welcome-new').onclick=newCase;$('#settings-button').onclick=settings;$('#close-modal').onclick=closeModal;
+$('#edit-case').onclick=editCase;
+$('#case-search').oninput=render;$('#add-reading').onclick=()=>addReading();$('#add-note').onclick=addNote;$('#add-pin').onclick=addPin;$('#outcome').onclick=outcome;$('#upload-button').onclick=upload;
+$('#lookup-form').onsubmit=lookup;$('#ask').onclick=ask;$('#question').oninput=draftSave;
+$('#question').onkeydown=event=>{if((event.metaKey||event.ctrlKey)&&event.key==='Enter'){event.preventDefault();ask();}};
+$('#export-case').onclick=async()=>{try{await download(new Blob([JSON.stringify(current,null,2)],{type:'application/json'}),`${current.id}-repair.json`);}catch(e){notice(e.message);}};
+$('#backup').onclick=async()=>{try{const result=await api('/api/backup',{});await download(await binary('/api/backup-file?name='+encodeURIComponent(result.filename)),result.filename);notice('Backup saved. It contains cases and original files; the API key is excluded.');}catch(e){notice(e.message);}};
+$('#find-cases').onclick=async()=>{try{const found=await api(`/api/confirmed?case_id=${caseId()}&q=${encodeURIComponent(current.symptom)}`);modal('Confirmed repair references',found.map(c=>`<div class="panel"><h3>${esc(c.title)}</h3><span class="pill ${c.same_board_revision?'':'warn'}">${c.same_board_revision?'Same board / revision':'Different or unknown board / revision'}</span><p class="small form-gap">${esc(c.symptom)}</p><p class="small">Fix: ${esc(c.outcome.fix)}</p><p class="small muted">Verified by: ${esc(c.outcome.verification)}<br>Cause: ${esc(c.outcome.cause_status)}</p></div>`).join('')||'<p class="modal-copy">No relevant confirmed repairs yet. Record a fix and post-repair verification to build this reference set.</p>');}catch(e){notice(e.message);}};
+$('#quit').onclick=async()=>{try{draftSave();await api('/api/quit',{});notice('BoardBrain has closed. Reopen it from the app icon.');}catch(e){notice(e.message);}};
+window.addEventListener('beforeunload',draftSave);
+(async()=>{await refresh();const previous=sessionStorage.getItem('bb-case');if(previous&&state?.cases.some(c=>c.id===previous))await loadCase(previous);setInterval(refresh,2200);})();
