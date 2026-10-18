@@ -161,30 +161,13 @@ in the codebase. Current gate status: the first reference-only pair has been
 inspected and imported locally. Full FlexBV/physical-board checks, a real repair,
 and live model acceptance remain outstanding.
 
-## First supplied reference pair: local checks
+## Reference-pair validation
 
-The supplied A2338 / 820-02020 pair is reference data, not a repair case. The files
-remain unchanged and are not included in this repository. Board revision has not
-been established. The schematic contains the supplied board identifier in its BOM;
-this does not establish applicability to every physical board revision.
-
-- The BVR contains 4,318 component starts and 13,713 explicit pin records. Three
-  component records are malformed: two contain unlabelled records and one lacks
-  its closing component marker. The importer accepts 4,315 components / 13,710
-  pins and excludes all three affected records. It reports partial connectivity.
-- An independent direct-field scan compared every accepted pin's number, label,
-  net, side, coordinates and source line with the original. All 13,710 matched;
-  this checks extraction fidelity, not the correctness of the source boardview.
-- All 117 PDF pages contain native text. The explicit contents table supplies
-  all 117 PDF-page/schematic-sheet mappings, including two blank titles. The index
-  and selected circuit pages were visually inspected. No OCR was needed for text
-  indexing; extracted text still does not reproduce electrical drawing topology.
-- Local integration checks covered a large rail, a letter-number pin label,
-  direct sheet lookup and an excluded component. Schematic pages remained visible
-  alongside pin matches, and excluded components returned reasons without mappings.
-- In this development environment the two-file import took about 2.7 seconds;
-  sampled local lookups took 48–81 ms. These are observations from this run, not
-  Mac benchmarks or AI response-time measurements. No paid model call was made.
+Keep board-specific counts, mappings, excerpts and timing results in private
+validation notes. For each reference pair, compare accepted pin fields with the
+original, review excluded records, verify PDF page/sheet mappings, and compare
+selected connections with the matching board viewer. Extraction fidelity does
+not establish source correctness or applicability to a physical board revision.
 
 ## Data and recovery
 
@@ -205,6 +188,20 @@ backup database with unrelated old WAL/SHM files.
 
 ## Verification recorded for this draft
 
+- Version 0.2.2 / setup revision 4 adds a large schematic viewer with page
+  navigation, zoom, sharper rendering at higher magnification, scrolling and
+  original-PDF opening. Pin results show the component, label, connected net,
+  source and applicability; raw source fields are available in a collapsed panel.
+  Schematic text matches are identified as page references, not proof of a pin's
+  connection. No database or evidence-authority rules changed.
+  On Linux Python 3.14.8, 58 tests were collected: 57 passed and the native Mac
+  signing check was skipped. PDF tests cover resolution bounds, page bounds and
+  case authorization. Both browser workflows passed in Chromium 140 using
+  synthetic files: the existing bench workflow and the new document workflow.
+  The latter covers readable pin results, viewer size, sharp zoom, panning, page
+  navigation, invalid input, visible errors/retry, narrow-window layout,
+  cancellation and photo preview. Native Mac verification of this viewer remains
+  a separate acceptance check.
 - Setup revision 3 handles signing-blocking Finder/resource-fork metadata.
   Setup now writes build/spec/dist output in a private temporary
   directory and cleans only the two blocking attributes on generated app copies.
@@ -223,7 +220,7 @@ backup database with unrelated old WAL/SHM files.
   prerequisite message was misleading for an installed 3.14. Dependency floors
   were raised for image handling, the native window and app packaging.
   On Linux Python 3.14.8, installation of the build requirements, all 52 tests,
-  the HTTP workflow and the supplied reference-pair import passed. Python 3.12
+  the synthetic HTTP workflow passed. Python 3.12
   also passed all 52 tests. CI now includes 3.14 and uses it for the Mac build;
   these checks do not establish native macOS window or Keychain compatibility.
 - 52 local Python tests passed on 2026-10-18, including Astra routing with the same
@@ -237,19 +234,16 @@ backup database with unrelated old WAL/SHM files.
   reference creation, boardview/PDF/photo import, exact lookup, PDF/photo rendering,
   and reuse in a new repair with fresh source IDs and cleared scope checks.
   The same check is run against the built Mac executable by the setup script.
-- The exact setup import command passed with the supplied reference pair in a
-  temporary workspace: 13,710 pins, 117 PDF pages, three known exclusions, no
-  outcome, unchanged original hashes, and no duplicate files/workspace on rerun.
 - Database schema 2 migrates existing schema-1 cases to kind `repair`. New reference
   workspaces cannot accept repair outcomes or physical measurement/pin records.
   A regression test verifies existing data survives the migration.
-- The browser workflow test is provided but could not execute here: Chromium's
-  download failed. Native window layout/interaction has not been visually verified.
+- Browser testing was initially blocked by a Chromium download failure. Both
+  workflows now pass with the available Chromium 140 build, as recorded above.
+  Native macOS window interaction still requires its own acceptance check.
 - GitHub workflow runs, including a retry of the latest run, failed before any runner steps started; the Mac
   build was skipped. Job logs were unavailable through the connector. No tested
   `.app` artifact has been produced by that run.
-- Live model calls, Keychain behavior and FlexBV comparison are unverified. One
-  actual reference pair has passed the extraction checks described above.
+- Live model calls, Keychain behavior and FlexBV comparison are unverified. Private reference validation is tracked separately.
 
 ## Primary references used
 

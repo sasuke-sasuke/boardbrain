@@ -108,11 +108,13 @@ def import_pdf(store, source, path, cancel, progress, ocr_pages):
     store.source_result(source["case_id"], source["id"], "partial" if missing else "ready", info, evidence)
 
 
-def render_page(store: Store, source: dict, page_number: int) -> bytes:
+def render_page(store: Store, source: dict, page_number: int, max_edge: int = 2200) -> bytes:
     import fitz
+    if not 600 <= max_edge <= 6000:
+        raise ValueError("Page resolution must be between 600 and 6000 pixels")
     with fitz.open(store.blobs / source["sha"]) as doc:
         if page_number < 1 or page_number > len(doc):
             raise ValueError("Page not found")
         page = doc[page_number - 1]
-        scale = min(2, 2200 / max(page.rect.width, page.rect.height))
+        scale = max_edge / max(page.rect.width, page.rect.height)
         return page.get_pixmap(matrix=fitz.Matrix(scale, scale), alpha=False).tobytes("png")

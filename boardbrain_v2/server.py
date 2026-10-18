@@ -142,7 +142,8 @@ class App:
         if path == "/api/page":
             if not source["name"].lower().endswith(".pdf"):
                 raise ValueError("This file is not a PDF")
-            return render_page(self.store, source, int(query.get("page", ["1"])[0])), "image/png"
+            return render_page(self.store, source, int(query.get("page", ["1"])[0]),
+                               int(query.get("max_edge", ["2200"])[0])), "image/png"
         return (self.store.blobs / source["sha"]).read_bytes(), "application/octet-stream"
 
 

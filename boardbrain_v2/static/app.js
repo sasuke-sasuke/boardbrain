@@ -5,6 +5,7 @@ const token = location.hash.slice(1) || sessionStorage.getItem('bb-token') || ''
 sessionStorage.setItem('bb-token', token);
 history.replaceState(null, '', location.pathname);
 let state = null, current = null, tab = 'bench', evidence = {}, seenJobs = new Map(), pendingQuestions = new Map(), refreshing = false, blobURLs = [], lastCaseSignature = '';
+let modalCleanup = null;
 const selectedPhotos = new Set();
 const dismissedJobs = new Set();
 const units = {voltage:'V',resistance:'Ω',diode:'V',current:'A',frequency:'Hz',continuity:''};
@@ -23,14 +24,19 @@ async function api(path, data) {
   if (!response.ok) throw Error(result.error || 'The request did not finish. Your saved data is still here.');
   return result;
 }
-async function binary(path) {
-  const response = await fetch(path, {headers:{Authorization:`Bearer ${token}`}});
+async function binary(path, signal) {
+  const response = await fetch(path, {headers:{Authorization:`Bearer ${token}`}, signal});
   if(!response.ok) throw Error((await response.json()).error);
   return response.blob();
 }
 function urlFor(blob) { const url = URL.createObjectURL(blob); blobURLs.push(url); return url; }
-function closeModal() { $('#modal').close(); blobURLs.forEach(URL.revokeObjectURL); blobURLs = []; }
-function modal(title, html, setup) {
+function clearModalResources() {
+  if(modalCleanup) { const cleanup=modalCleanup; modalCleanup=null; cleanup(); }
+  blobURLs.forEach(URL.revokeObjectURL); blobURLs=[];
+}
+function closeModal() { $('#modal').close(); clearModalResources(); }
+function modal(title, html, setup, variant='') {
+  clearModalResources(); $('#modal').className=variant;
   $('#modal-title').textContent = title; $('#modal-content').innerHTML = html;
   $('#modal-error').hidden = true;
   if (!$('#modal').open) $('#modal').showModal();
@@ -142,7 +148,7 @@ function renderPlan() {
   }).join('')+`<div class="summary">${esc(plan.summary)}</div>${current.kind==='reference'&&Object.keys(event.data.evidence||{}).length?`<div class="panel form-gap"><h3>Evidence retrieved</h3>${Object.keys(event.data.evidence).slice(0,25).map(id=>`<button class="source-chip" data-evidence="${esc(id)}">${esc(evidenceLabel(id))}</button>`).join('')}</div>`:''}${event.data.model?`<p class="microcopy">${esc(modelLabel(event.data.model))} · ${event.data.analysis_mode==='deep'?'Deeper':'Standard'} analysis · Estimated $${Number(event.data.estimated_cost||0).toFixed(3)} · ${Number(event.data.elapsed_seconds||0).toFixed(1)} s</p>`:''}`+(plan.questions.length?`<div class="questions"><h3>To narrow this down</h3>${plan.questions.map(q=>`<p>${esc(q)}</p>`).join('')}</div>`:'');
   $('#hypotheses').innerHTML=(plan.hypotheses.length?`<div class="hypotheses"><div class="section-label">WORKING HYPOTHESES</div>${plan.hypotheses.map(h=>`<div class="hypothesis">${esc(h.idea)}<br><span>Support: ${h.support.length} sources · Contradictions: ${h.contradictions.length}</span>${[...h.support,...h.contradictions].filter((x,i,a)=>a.indexOf(x)===i).map(x=>`<button class="source-chip" data-evidence="${esc(x)}">${esc(evidenceLabel(x))}</button>`).join('')}</div>`).join('')}</div>`:'')+(plan.web_sources.length?`<div class="panel"><h3>Research references · verify applicability</h3>${plan.web_sources.map(s=>`<p class="small"><a href="${esc(s.url)}" target="_blank" rel="noreferrer noopener">${esc(s.title||s.url)} ↗</a></p>`).join('')}</div>`:'');
 }
-function pinLabel(d) { return `${d.ref}.${d.pin}${d.name&&d.name!==d.pin?` (label ${d.name})`:''}`; }
+function pinLabel(d) { return `${d.ref}.${d.name||d.pin}`; }
 function documentLabel(d) { return `PDF page ${d.page}${d.sheet?` · schematic sheet ${d.sheet}`:''}${d.page_title?` · ${d.page_title}`:''}`; }
 function evidenceLabel(id) { const e=evidence[id];return e?.kind==='document'?documentLabel(e.data):e?.kind==='pin'?pinLabel(e.data):e?.kind==='measurement'?e.data.target:e?.name||id; }
 function readingLabel(d) { return `${d.value} ${d.unit}`.trim(); }
@@ -211,20 +217,82 @@ function upload() {
   }));
 }
 async function showPhoto(id) {
-  const source=current.sources.find(s=>s.id===id);const blob=await binary(`/api/photo?case_id=${caseId()}&id=${id}`);
-  modal(source.name,`<img class="photo-preview" src="${urlFor(blob)}" alt="Uploaded board photo">`);
+  const source=current.sources.find(s=>s.id===id), cid=caseId();
+  modal(source.name,'<div id="photo-image" class="muted">Loading photo…</div>');
+  const holder=$('#photo-image');
+  try {
+    const blob=await binary(`/api/photo?case_id=${cid}&id=${id}`);
+    if(holder.isConnected) holder.innerHTML=`<img class="photo-preview" src="${urlFor(blob)}" alt="Uploaded board photo">`;
+  } catch(error) { if(holder.isConnected) { $('#modal-error').textContent=error.message;$('#modal-error').hidden=false; } }
 }
 async function showPDF(id,page=1) {
   const source=current.sources.find(s=>s.id===id);
-  const label=documentLabel({page,...(source.info.sheet_index?.[String(page)]||{})});
-  modal(source.name,`<p class="modal-copy">${esc(label)}</p><form id="page-form" class="inline"><input name="page" type="number" value="${page}" min="1" max="${source.info.pages||1500}" aria-label="Page number"><button class="secondary" type="submit">View page</button></form><p class="modal-copy form-gap">Compare text with the original drawing; OCR alone does not establish connectivity.</p><div id="page-image" class="muted">Loading page…</div>`,()=>formAction($('#page-form'),async form=>showPDF(id,Number(form.get('page')))));
-  const blob=await binary(`/api/page?case_id=${caseId()}&id=${id}&page=${page}`);
-  if($('#page-image')) $('#page-image').innerHTML=`<img class="document-preview" src="${urlFor(blob)}" alt="Document page ${page}">`;
+  if(!source) throw Error('Open the workspace containing this PDF first.');
+  const cid=caseId(), pages=source.info.pages||1500;
+  modal(source.name,`<p id="pdf-page-label" class="modal-copy"></p><div class="pdf-toolbar"><div class="inline"><button id="pdf-prev" class="quiet" type="button" aria-label="Previous page">←</button><button id="pdf-next" class="quiet" type="button" aria-label="Next page">→</button><form id="page-form" class="inline"><label for="pdf-page-number">PDF page</label><input id="pdf-page-number" name="page" type="number" value="${page}" min="1" max="${pages}" required aria-label="PDF page number"><span>of ${pages}</span><button class="secondary" type="submit">Go to page</button></form></div><div class="inline"><button id="pdf-fit" class="quiet" type="button">Fit width</button><button id="pdf-zoom-out" class="quiet" type="button" aria-label="Zoom out">−</button><select id="pdf-zoom" aria-label="Schematic zoom">${[.5,1,1.5,2,3,4].map(z=>`<option value="${z}" ${z===1?'selected':''}>${z*100}%</option>`).join('')}</select><button id="pdf-zoom-in" class="quiet" type="button" aria-label="Zoom in">+</button><button class="quiet" data-open-source="${esc(id)}" type="button">Open original PDF</button></div></div><div class="pdf-status-line"><span id="pdf-status" role="status" aria-live="polite"></span><span>Zoom in, then scroll to inspect the drawing.</span></div><div id="pdf-viewport" tabindex="0" aria-label="Schematic page; scroll to pan"><img id="pdf-page-image" alt="" hidden></div>`,null,'pdf-dialog');
+  const viewport=$('#pdf-viewport'), img=$('#pdf-page-image'), label=$('#pdf-page-label'), status=$('#pdf-status'), input=$('#pdf-page-number');
+  const zooms=[.5,1,1.5,2,3,4];
+  let active=true, controller=null, sequence=0, url=null, zoom=1, shownPage=0, renderedEdge=0, timer=null;
+  function sizeImage() { img.style.width=`${Math.round(Math.max(100,viewport.clientWidth-24)*zoom)}px`; }
+  function resolution() { return Math.round(Math.min(6000,Math.max(2200,(viewport.clientWidth-24)*zoom*(window.devicePixelRatio||1)*Math.max(1,img.naturalHeight/(img.naturalWidth||1))))); }
+  async function loadPage(next, force=false) {
+    if(!Number.isInteger(next)||next<1||next>pages) { $('#modal-error').textContent=`Choose a PDF page from 1 to ${pages}.`;$('#modal-error').hidden=false;return; }
+    const changing=next!==shownPage;
+    page=next;input.value=page;
+    label.textContent=documentLabel({page,...(source.info.sheet_index?.[String(page)]||{})});
+    $('#pdf-prev').disabled=page===1;$('#pdf-next').disabled=page===pages;
+    sizeImage();const edge=resolution();
+    if(!changing&&!force&&renderedEdge>=edge) return;
+    if(controller) controller.abort();controller=new AbortController();const ticket=++sequence;
+    if(changing) { img.hidden=true;viewport.scrollTo(0,0); }
+    $('#modal-error').hidden=true;status.textContent=changing?`Loading PDF page ${page}…`:'Sharpening page…';
+    viewport.setAttribute('aria-busy','true');
+    let candidate=null;
+    try {
+      const blob=await binary(`/api/page?case_id=${encodeURIComponent(cid)}&id=${encodeURIComponent(id)}&page=${page}&max_edge=${edge}`,controller.signal);
+      if(!active||ticket!==sequence) return;
+      candidate=URL.createObjectURL(blob);
+      const ready=new Image();ready.src=candidate;await ready.decode();
+      if(!active||ticket!==sequence) { URL.revokeObjectURL(candidate);return; }
+      if(url) URL.revokeObjectURL(url);url=candidate;candidate=null;
+      img.src=url;img.alt=`Schematic PDF page ${page}`;img.hidden=false;sizeImage();
+      shownPage=page;renderedEdge=edge;
+      status.textContent=`PDF page ${page} loaded · ${Math.round(zoom*100)}%`;
+    } catch(error) {
+      if(candidate) URL.revokeObjectURL(candidate);
+      if(!active||ticket!==sequence||error.name==='AbortError') return;
+      status.textContent='Page could not load. Use Go to page to retry.';
+      $('#modal-error').textContent=error.message;$('#modal-error').hidden=false;
+    } finally { if(active&&ticket===sequence) viewport.setAttribute('aria-busy','false'); }
+  }
+  function setZoom(next) {
+    const before=zoom;zoom=next;$('#pdf-zoom').value=String(zoom);sizeImage();
+    viewport.scrollLeft=(viewport.scrollLeft+viewport.clientWidth/2)*zoom/before-viewport.clientWidth/2;
+    viewport.scrollTop=(viewport.scrollTop+viewport.clientHeight/2)*zoom/before-viewport.clientHeight/2;
+    $('#pdf-zoom-out').disabled=zoom===zooms[0];$('#pdf-zoom-in').disabled=zoom===zooms[zooms.length-1];
+    status.textContent=`PDF page ${page} · ${Math.round(zoom*100)}%`;
+    clearTimeout(timer);timer=setTimeout(()=>loadPage(page),120);
+  }
+  $('#page-form').addEventListener('submit',event=>{event.preventDefault();loadPage(Number(input.value),true);});
+  $('#pdf-prev').onclick=()=>loadPage(page-1);$('#pdf-next').onclick=()=>loadPage(page+1);
+  $('#pdf-zoom').onchange=event=>setZoom(Number(event.target.value));
+  $('#pdf-zoom-in').onclick=()=>setZoom(zooms[Math.min(zooms.length-1,zooms.indexOf(zoom)+1)]);
+  $('#pdf-zoom-out').onclick=()=>setZoom(zooms[Math.max(0,zooms.indexOf(zoom)-1)]);
+  $('#pdf-fit').onclick=()=>{setZoom(1);viewport.scrollTo(0,0);};
+  const resize=()=>{sizeImage();clearTimeout(timer);timer=setTimeout(()=>loadPage(page),180);};
+  window.addEventListener('resize',resize);
+  modalCleanup=()=>{active=false;sequence++;clearTimeout(timer);controller?.abort();if(url)URL.revokeObjectURL(url);window.removeEventListener('resize',resize);};
+  await loadPage(Number(page));
 }
 async function showEvidence(id) {
   const e=evidence[id];if(!e) throw Error('Evidence is no longer in the current view. Search it again.');
   if(e.kind==='document'&&e.source_id) return showPDF(e.source_id,e.data.page);
   if(e.kind==='photo') return showPhoto(e.id);
+  if(e.kind==='pin') {
+    const d=e.data, imported=!!e.source_id;
+    modal(`${d.ref} · pin ${d.name||d.pin}`,`<div class="pin-connection"><span>Connected net</span><strong>${esc(d.net)}</strong><p>${imported?'Connection recorded in your boardview.':'Mapping recorded as checked by the technician.'}</p></div><dl class="evidence-facts"><dt>Component</dt><dd>${esc(d.ref)}</dd><dt>Pin label</dt><dd>${esc(d.name||d.pin)}</dd>${d.name&&d.name!==d.pin?`<dt>Boardview pin ID</dt><dd>${esc(d.pin)} <span class="muted">(numeric identifier in the file)</span></dd>`:''}<dt>Source</dt><dd>${esc(e.name||'Technician checked mapping')}</dd>${d.side?`<dt>Board side</dt><dd>${esc(d.side==='T'?'Top (T)':d.side==='B'?'Bottom (B)':d.side)}</dd>`:''}</dl><p class="${e.conflict?'warning':'modal-copy'}">${e.conflict?'Conflicting mappings: verify this pin before using it.':e.scope_confirmed?'Board and revision applicability has been checked.':'File applicability is unconfirmed: the board/revision has not been matched to a physical repair. You can still explore these reference files.'}</p><p class="modal-copy">This identifies an electrical connection. Expected voltage and circuit behavior come from the matching schematic and test conditions.</p>${d.basis?`<p class="small">Verification: ${esc(d.basis)}</p>`:''}<details class="source-details"><summary>Technical source details</summary><pre class="evidence-json">${esc(JSON.stringify(d,null,2))}</pre></details>`);
+    return;
+  }
   modal('Evidence · '+id,`<p class="modal-copy">${esc(e.name||'Recorded case observation')}${e.conflict?' · CONFLICT: check this mapping before use':''}</p><pre class="evidence-json">${esc(JSON.stringify(e.data,null,2))}</pre>`);
 }
 async function lookup(event) {
@@ -232,7 +300,9 @@ async function lookup(event) {
   try{
     const found=await api(`/api/lookup?case_id=${caseId()}&q=${encodeURIComponent(q)}`);found.forEach(e=>evidence[e.id]=e);
     const coverage=found[0]?.lookup_coverage;
-    $('#lookup-results').innerHTML=(coverage?.truncated?`<p class="muted small">Showing ${coverage.imported_pins_returned} of ${coverage.imported_pin_matches} imported pin matches and ${coverage.documents_returned} of ${coverage.document_matches} document pages. Narrow the search for more specific results.</p>`:'')+found.map(e=>`<div class="lookup-row"><b>${esc(e.kind==='pin'?`${pinLabel(e.data)} → ${e.data.net}`:e.kind==='document'?documentLabel(e.data):e.name||e.kind)}</b><p>${esc(e.kind==='pin'?(e.conflict?'Conflicting mappings — do not use':e.scope_confirmed?'Board scope checked':'Board/revision unconfirmed'):e.data.text?.slice(0,260)||JSON.stringify(e.data))}</p><button class="source-chip" data-evidence="${e.id}">${e.kind==='document'?'Open schematic page':'View evidence'}</button></div>`).join('')||'<p class="muted small">No matching evidence in this case. Check spelling, including +, − and #. Add a checked mapping if needed.</p>';
+    const row=e=>`<div class="lookup-row"><b>${esc(e.kind==='pin'?`${pinLabel(e.data)} → ${e.data.net}`:e.kind==='document'?documentLabel(e.data):e.name||e.kind)}</b>${e.kind==='pin'?`<p>${e.source_id?'Boardview connection':'Technician checked mapping'} · ${esc(e.conflict?'Conflicting mappings — verify before use':e.scope_confirmed?'Board scope checked':'File applicability unconfirmed')}</p>`:e.kind==='document'?`<p>${/^(?:schematic\s+)?(?:sheet|(?:pdf\s+)?page)\s+\d+$/i.test(q)?'Matching schematic page.':`Page text mentions ${esc(e.matched_reference||q)}. Open the drawing to inspect the circuit.`}</p><details class="source-details"><summary>Extracted text</summary><p>${esc(e.data.text||'No text excerpt available.')}</p></details>`:`<p>${esc(e.data.text||JSON.stringify(e.data))}</p>`}<button class="source-chip" data-evidence="${esc(e.id)}">${e.kind==='document'?'Open schematic page':e.kind==='pin'?'View pin details':'View evidence'}</button></div>`;
+    const group=(title,items)=>items.length?`<section class="lookup-group"><h4>${title}</h4>${items.map(row).join('')}</section>`:'';
+    $('#lookup-results').innerHTML=(coverage?.truncated?`<p class="muted small">Showing ${coverage.imported_pins_returned} of ${coverage.imported_pin_matches} imported pin matches and ${coverage.documents_returned} of ${coverage.document_matches} document pages. Narrow the search for more specific results.</p>`:'')+group('Pin connections',found.filter(e=>e.kind==='pin'))+group('Schematic references',found.filter(e=>e.kind==='document'))+group('Other evidence',found.filter(e=>!['pin','document'].includes(e.kind)))||'<p class="muted small">No matching evidence in this case. Check spelling, including +, − and #. Add a checked mapping if needed.</p>';
   }catch(e){notice(e.message);}
 }
 async function ask() {
@@ -262,6 +332,7 @@ document.addEventListener('click',async event=>{
 });
 document.addEventListener('change',event=>{const id=event.target.dataset.photo;if(id){if(event.target.checked&&selectedPhotos.size>=2){event.target.checked=false;notice('Choose up to two photos for one question.');return;}event.target.checked?selectedPhotos.add(id):selectedPhotos.delete(id);}});
 $('#new-case').onclick=()=>newCase();$('#welcome-new').onclick=()=>newCase();$('#new-reference').onclick=()=>newCase('reference');$('#start-from-reference').onclick=()=>newCase('repair',current);$('#settings-button').onclick=settings;$('#close-modal').onclick=closeModal;
+$('#modal').addEventListener('close',()=>{if(!$('#modal').open)clearModalResources();});
 $('#edit-case').onclick=editCase;
 $('#case-search').oninput=render;$('#add-reading').onclick=()=>addReading();$('#add-note').onclick=addNote;$('#add-pin').onclick=addPin;$('#outcome').onclick=outcome;$('#upload-button').onclick=upload;
 $('#deep-analysis').onchange=renderAnalysisHint;

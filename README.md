@@ -35,7 +35,7 @@ installation can use Python 3.14 from the
 for the one-time dependency installation. If Apple Command Line Tools are missing,
 setup opens Apple's installer; finish that installation and rerun setup. The full
 Xcode application is not needed. The app runs independently of that
-build environment afterward. Setup revision 3 builds in a private temporary
+build environment afterward. Setup builds in a private temporary
 directory, removes signing-blocking Finder/resource-fork metadata from the built
 app, then signs and strictly verifies it before installation. If setup stops, its `BoardBrain-Setup.log` records
 the failure; do not include an API key when sharing a log.
@@ -62,8 +62,8 @@ Native PDF text and the visual page viewer work without it.
 ## Bench workflow
 
 1. Open a **Board reference** to explore files without a symptom or outcome.
-   The private setup package includes A2338 / 820-02020 in this mode. Search
-   `U5200.A1` or `sheet 52`, and inspect **Files & photos** for import details.
+   Import a matching boardview and schematic, then search a component/pin or
+   schematic sheet. Inspect **Files & photos** for import details.
    When a physical repair is ready, choose **Start repair from these files**.
    It reuses original files and indexed evidence but requires fresh scope checks;
    it does not copy reference notes, model answers, measurements or outcomes.
@@ -89,9 +89,18 @@ interchange format, not a claim about a FlexBV export feature. Other boardview
 variants remain stored and available to FlexBV until their parsers are validated.
 
 Exact lookup preserves boardview pin numbers and separate pin labels, including
-ball labels such as `A1`. It also returns matching schematic pages when a net has
-many pins. Supported native contents tables supply separate PDF page and schematic
-sheet labels; the original PDF remains the source for interpreting the drawing.
+ball labels such as `A1`. Pin connections appear first, with readable details for
+the component, pin label, connected net and source. A boardview connection does
+not establish the expected voltage or a diagnosis. Schematic results identify
+pages whose text mentions the search term or component; inspect the drawing to
+check the actual circuit relationship.
+
+The schematic viewer fills most of the app window. Use **Go to page** for a PDF
+page number, the arrows for adjacent pages, and **Fit width** or the zoom controls
+to inspect the drawing. Higher zoom requests a sharper image; scroll to pan.
+**Open original PDF** opens the source in the Mac's default PDF application.
+Supported native contents tables supply separate PDF page and schematic sheet
+labels. Those numbers can differ; the viewer's page entry uses the PDF number.
 
 The new runtime uses a separate data directory/database. It leaves the old data
 and legacy app intact. See [the rebuild notes](docs/BENCH_REBUILD.md) for evidence
@@ -113,6 +122,7 @@ The browser workflow test requires Playwright and its Chromium installation:
 
 ```bash
 node tests_v2/ui_smoke.cjs /path/to/isolated/test-data/runtime.json
+node tests_v2/ui_documents.cjs /path/to/isolated/test-data/runtime.json
 ```
 
 The tests use synthetic fixtures and a fake model transport. Customer boardviews,

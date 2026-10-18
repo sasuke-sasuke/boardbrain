@@ -39,8 +39,8 @@ const { chromium } = require(process.env.CODEX_PRIMARY_RUNTIME_NODE_MODULES ? pr
   await page.locator('#lookup-results').getByText('U1.2 → USB_D-',{exact:true}).waitFor();
   // Ensure polling doesn't destroy evidence controls or their backing registry.
   await page.waitForTimeout(2400);
-  await page.locator('#lookup-results').getByRole('button',{name:'View evidence'}).click();
-  await dialog.locator('pre').getByText('USB_D-', {exact:false}).waitFor();
+  await page.locator('#lookup-results').getByRole('button',{name:'View pin details'}).click();
+  await dialog.locator('.pin-connection strong').getByText('USB_D-', {exact:true}).waitFor();
   await page.getByRole('button',{name:'Close dialog'}).click();
   await page.locator('#question').fill('What should I check next?');
   await page.getByRole('button',{name:'Find the next step',exact:false}).click();

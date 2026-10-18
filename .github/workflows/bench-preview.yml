@@ -32,6 +32,7 @@ jobs:
           trap 'kill "$app_pid" 2>/dev/null || true' EXIT
           python -c 'import pathlib,time,os; p=pathlib.Path(os.environ["RUNNER_TEMP"])/"bench-test/runtime.json"; deadline=time.monotonic()+15; exec("while not p.exists():\n if time.monotonic()>deadline: raise RuntimeError(\"server did not start\")\n time.sleep(.1)")'
           node tests_v2/ui_smoke.cjs "$RUNNER_TEMP/bench-test/runtime.json" "$RUNNER_TEMP/bench-ui.png"
+          node tests_v2/ui_documents.cjs "$RUNNER_TEMP/bench-test/runtime.json"
       - uses: actions/upload-artifact@v4
         if: always()
         with:

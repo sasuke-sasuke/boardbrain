@@ -532,6 +532,30 @@ class HTTPTests(unittest.TestCase):
         with self.request('/') as result:self.assertIn("frame-ancestors 'none'",result.headers['Content-Security-Policy'])
         with self.assertRaises(urllib.error.HTTPError):self.request('/../store.py')
 
+    def test_pdf_zoom_resolution_page_navigation_and_case_isolation(self):
+        import fitz
+        from PIL import Image
+        case=self.store.create_case({"kind":"reference","title":"PDF viewer fixture"})['id']
+        other=self.store.create_case({"kind":"reference","title":"Other workspace"})['id']
+        with fitz.open() as doc:
+            doc.new_page(width=1200,height=800).insert_text((50,50),'U1 synthetic schematic')
+            doc.new_page(width=800,height=1200).insert_text((50,50),'Second page')
+            source=self.store.add_source(case,'viewer.pdf',doc.tobytes(),'schematic')
+        headers={"Authorization":"Bearer "+self.app.token}
+        path=f'/api/page?case_id={case}&id={source["id"]}'
+        for page,edge in [(1,600),(1,3200),(2,600)]:
+            with self.request(f'{path}&page={page}&max_edge={edge}',headers) as response:
+                image=Image.open(io.BytesIO(response.read()))
+                self.assertLessEqual(max(image.size),edge+1)
+                self.assertGreaterEqual(max(image.size),edge)
+                self.assertEqual(image.width>image.height,page==1)
+        for suffix in ['&max_edge=599','&max_edge=6001','&max_edge=bad','&page=3']:
+            with self.assertRaises(urllib.error.HTTPError) as error:self.request(path+suffix,headers)
+            self.assertEqual(error.exception.code,400)
+            error.exception.close()
+        with self.assertRaises(urllib.error.HTTPError):
+            self.request(f'/api/page?case_id={other}&id={source["id"]}&max_edge=3200',headers)
+
     def test_malformed_body_and_cross_case_file(self):
         headers={"Authorization":"Bearer "+self.app.token,"Content-Type":"application/json"}
         with self.assertRaises(urllib.error.HTTPError) as error:self.request('/api/cases',headers,b'{')
