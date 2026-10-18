@@ -1,257 +1,143 @@
-# BoardBrain v1.1 (Local Motherboard Diagnostic Copilot)
+# BoardBrain · repair bench preview
 
-Local Streamlit web app for MacBook USB‑C no‑power workflows with **schematic-first** guardrails and a **Known-Good Baseline** library.
+A local Mac workspace for board repairs: capture observations, inspect evidence,
+choose the next test, and retain confirmed repair outcomes.
 
-## Setup (macOS)
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install -U pip
-pip install -r requirements.txt
+**Status: new runtime preview.** This rebuild is ready for code review and real-file
+validation. It is not yet proven faster or more accurate on shop repairs. No live
+AI diagnosis or native-window acceptance test is implied by the automated tests.
 
-cp .env.example .env
-# edit .env and paste your OpenAI API key
+**First milestone: one boardview and its matching schematic.** These can be
+reference files; a repair symptom or outcome is not required to build and validate
+the import. Verify exact board/revision applicability and compare with FlexBV
+5.1244 before using mappings on a physical repair. Diagnostic outcome evaluation
+comes later, when a real repair is available.
 
-python -m boardbrain.ingest
-streamlit run app/app.py
-```
+## Start on a Mac
 
-You can also run via the helper script:
-```bash
-./run.sh
-```
-If you run manually, ensure the project root is on `PYTHONPATH`:
-```bash
-export PYTHONPATH="$(pwd)"
-export KB_RAW_DIR="$(pwd)/kb_raw"
-python -m boardbrain.ingest
-streamlit run app/app.py
-```
+The intended everyday launch is **BoardBrain.app from Finder or the Dock**. Cases
+reopen from local storage; launch does not re-ingest documents or call the AI.
 
-## Chat-First Workflow
-Each case has a persistent chat thread stored in SQLite. One chat is attached to one case, and history survives app restarts.
+For the prepared setup download, unzip it and double-click
+**Setup-BoardBrain.command**. The one-time setup downloads dependencies, runs the
+checks, builds the Apple Silicon app, checks the packaged runtime, imports an
+included private reference bundle if present, and installs it in
+`~/Applications/BoardBrain.app`. It then opens the app and reveals it in Finder.
+Keep it in the Dock. No typed Terminal commands are needed.
 
-### Commands
-```
-/measure rail=PP3V3_AON value=3.28 unit=V note="stable"
-/note text="USB-C 5V/0.20A steady; no fan spin"
-/update
-/done
-```
+Setup uses an existing native Python 3.11–3.14 installation. Python 3.14 is
+accepted from python.org, Homebrew, or the user's PATH. The log
+records the selected interpreter and explains skipped installations. If none is
+found, it reports the supported range and requests the log when Python is already
+installed, instead of sending the user to install an older version. A new
+installation can use Python 3.14 from the
+[official Mac downloads](https://www.python.org/downloads/macos/). Network access is needed
+for the one-time dependency installation. If Apple Command Line Tools are missing,
+setup opens Apple's installer; finish that installation and rerun setup. The full
+Xcode application is not needed. The app runs independently of that
+build environment afterward. Setup builds in a private temporary
+directory, removes signing-blocking Finder/resource-fork metadata from the built
+app, then signs and strictly verifies it before installation. If setup stops, its `BoardBrain-Setup.log` records
+the failure; do not include an API key when sharing a log.
 
-### Measurement formatting tips (strict)
-Measurements only parse when units or explicit keywords are present.
-Net mentions without a unit (e.g., “PP3V3_S2 is stable”) are treated as questions.
-Use `NET value unit` or `NET: value unit` format; avoid prose between the net and the value.
-```
-PP3V3_AON: 3.29V
-PPBUS_AON 12.3 V
-PPBUS_AON: r2g 12.5 ohms
-PP1V8_AON: 1.8v stable
-PPBUS_AON: diode 0.420
-CHECK_PPBUS_AON: 0.0V
-F7000 good
-USB-C: 5V 0.20A
-```
+This is a development preview, not a notarized installer. If macOS blocks the
+setup file on first open, use the per-file **Open Anyway** option in System
+Settings → Privacy & Security. Do not disable macOS security globally.
+An existing app at the installation destination is moved to a dated Previous
+copy; saved cases live separately. Quit an existing BoardBrain before setup.
 
-### Plan updates (pinned panel)
-- The plan auto-updates as soon as you enter valid measurements.
-- You can still type `/update`, `/done`, or click **Update Plan**/**Done** to force a refresh.
-- Normal chat questions never update the plan (chat replies include “Plan unchanged.”).
-- `/done` marks satisfied requested measurements before recomputing the plan.
-Plan updates only occur when the message matches explicit measurement grammar (units or keywords required).
+The **BoardBrain bench preview** GitHub Actions workflow also defines an Apple
+Silicon app build after verification. Current runs stop before test steps and
+produce no app artifact; the underlying runner failure remains unresolved.
+The local setup path is the available delivery path, not a claim of a tested Mac
+binary from this Linux development environment.
 
-### Requested Measurements
-Plans include a **Requested Measurements** list. As you enter measurements, items are marked done automatically when the rail/key matches.
-Requested measurements are parsed from the machine JSON block when present; the JSON is stripped from the displayed plan.
-If JSON is missing/invalid, the app falls back to the human KEY/PROMPT list and preserves the previous list if parsing fails.
+Open **Settings & equipment** to enter the API key, budget and instrument models.
+The default app limit is $75/month with a $50 warning threshold. Cases and files
+work without an API key. ChatGPT subscriptions and API billing are separate.
 
-Note: avoid embedding literal JSON braces inside Python f-strings in prompt templates; keep JSON examples in plain strings.
-The measurement-format cheat sheet is injected as static UI text after plan generation and is not sent to the model.
+Tesseract is optional for scanned-page OCR and is not bundled in this preview.
+Native PDF text and the visual page viewer work without it.
 
-### Rail-name guardrail (no hallucinated nets)
-BoardBrain validates any net/rail name against a schematic-derived netlist that includes both power rails (PP*) and signal nets (e.g., `SMBUS_SCL`, `KBDBKLT_SW2`). Guardrails are **balanced strict**: auto-fixes only occur for exact normalization, explicit mappings, or extremely high-confidence unique matches. Otherwise, it will refuse to treat the net as fact, suggest close matches, and ask for the exact net name or a schematic/boardview snippet. You may still request **GENERIC (NOT SCHEMATIC-CONFIRMED)** guidance.
-Guardrail warnings are shown in the Debug panel and included in the Copy debug report.
-If you enter a measurement with an unknown net, the app shows a **Net Confirmation** panel with suggested matches. Measurements are not saved and the plan does not update until you confirm valid nets.
-USB-C meter readings are treated as a port node and stored as a single combined entry when both V and A are present (e.g., “USB-C: 5V 0.20A”).
-Requested measurement keys use **CHECK_** only. Any `VERIFY_`, `MEASURE_`, or `TEST_` keys are normalized to `CHECK_<NETNAME>` where NETNAME is an exact net from the netlist (signal nets included).
-After changing net extraction rules, re-run:
-```bash
-python -m boardbrain.ingest
-```
-If a net still does not validate, delete the cached netlist under `data/netlists/` and re-run ingest.
+## Bench workflow
 
-### Nets vs Components (separate truth lanes)
-- Nets/rails use the netlist and can update plans when entered with explicit net measurement syntax.
-- Components use the component index and never update plans in v1.
-- Component measurements must use explicit COMP syntax (below).
+1. Open a **Board reference** to explore files without a symptom or outcome.
+   Import a matching boardview and schematic, then search a component/pin or
+   schematic sheet. Inspect **Files & photos** for import details.
+   When a physical repair is ready, choose **Start repair from these files**.
+   It reuses original files and indexed evidence but requires fresh scope checks;
+   it does not copy reference notes, model answers, measurements or outcomes.
+   A new repair without reference files is also available.
+2. Save readings and observations. Quick entry supports `PP3V3 = 3.28 V`,
+   `U7000.1 = 12 kΩ` and `USB_D+ = diode 0.42 V`; review conditions before saving.
+3. Add photos, PDFs and boardviews. Check the visible import status and file scope.
+4. Ask for the next test. Standard analysis defaults to **GPT-6.1 Sol**. Use
+   **Deeper analysis** for **GPT-6 Astra** on difficult cases; it can take longer
+   and costs more. Select photos explicitly; enable online research when needed.
+   The response records its model, elapsed time and estimated cost. Exact lookups
+   and saving readings incur no AI charge.
+5. Correct an incorrect observation by retracting it and recording the correction.
+6. Confirm a repair only after recording the fix and post-repair verification.
+   Keep suspected causes separate from verified causes.
 
-Component measurement format (stored, no plan update):
-```
-COMP U7000.pin3: 1.8V
-COMP Q3200.gate: 0.62V
-COMP J3210.A5: 5V
-```
+Plain `BVRAW_FORMAT_3` (including the observed `50.50.` prefix) and CSV with
+`ref,pin,net` columns have strict connectivity adapters. Malformed component
+records are excluded and listed in import details; a partial import is never a
+complete netlist. Global structural errors still reject the whole import.
+Optional CSV columns: `side` (`T`, `B`, `O`), `x`, `y`. This is an explicit
+interchange format, not a claim about a FlexBV export feature. Other boardview
+variants remain stored and available to FlexBV until their parsers are validated.
 
-After changing component extraction regex, re-run:
-```bash
-python -m boardbrain.ingest
-```
+Exact lookup preserves boardview pin numbers and separate pin labels, including
+ball labels such as `A1`. Pin connections appear first, with readable details for
+the component, pin label, connected net and source. A boardview connection does
+not establish the expected voltage or a diagnosis. Schematic results identify
+pages whose text mentions the search term or component; inspect the drawing to
+check the actual circuit relationship.
 
-### Chat UX
-- Message input is at the top of the chat panel.
-- Newest messages show first; use **Load older messages** to page back.
+The schematic viewer fills most of the app window. Use **Go to page** for a PDF
+page number, the arrows for adjacent pages, and **Fit width** or the zoom controls
+to inspect the drawing. Higher zoom requests a sharper image; scroll to pan.
+**Open original PDF** opens the source in the Mac's default PDF application.
+Supported native contents tables supply separate PDF page and schematic sheet
+labels. Those numbers can differ; the viewer's page entry uses the PDF number.
 
-### Format Cheat Box (copy/paste)
-✅ Measurements (auto-save + auto-update plan)
-- “PPBUS_AON 12.3 V”
-- “CHECK_PP3V3_S2 3.31 V”
-- “PP3V3_S2 r2g 120 ohms”
-- “L7740 diode 0.412 V”
-- “F7000 continuity pass”
+Version 0.2.3 lets the assistant request actual PDF page images and enlarged
+sections during a question. It can use an exact native-text label or a normalized
+page region, with a limit of four views and six model rounds. No whole-document
+image upload runs automatically. Click an image citation to inspect the exact
+view supplied to the model, then **Open full page** for its surrounding circuit.
 
-✅ Mixed (saves measurements AND answers question)
-- “PPBUS_AON 12.3 V — is that normal for no-power?”
+Answers distinguish recorded pin connections, quoted document text, visual
+observations, interpretations, general principles and unknowns. Attached-file
+questions require a fresh lookup; reference answers use validated claim records
+instead of an unrestricted summary. Citation identity, pin fields and quoted
+text are checked in code. These checks do not prove that a visual interpretation
+or an inference is correct; real-model and bench validation remain necessary.
 
-✅ Prefix normalization
-- If a plan ever emits `VERIFY_PPBUS_AON`, it is normalized to `CHECK_PPBUS_AON`.
-- Entering “PPBUS_AON 12.3 V” completes `CHECK_PPBUS_AON`.
+The new runtime uses a separate data directory/database. It leaves the old data
+and legacy app intact. See [the rebuild notes](docs/BENCH_REBUILD.md) for evidence
+rules, limitations, backup/restore, research sources and the real-board acceptance
+gate. The [legacy setup instructions](docs/LEGACY.md) remain available.
 
-❌ Questions (no plan update)
-- “What does PP3V3_S2 feed?”
-- “Where do I measure P3V3S2_PWR_EN?”
-- “Do you mean stable as in no droop?”
-
-### Deleting cases (permanent)
-Deleting a case permanently removes all data tied to that case_id:
-chat history, plan versions, requested measurements, measurements, notes, attachment rows, and the case folder under `data/cases/<case_id>/`.
-The delete confirmation shows counts for each item before you confirm.
-
-### Duplicate case titles
-If you create a case with a title that already exists, it is auto-suffixed as `Title (2)`, `Title (3)`, etc.
-Case identity is still the unique case_id; the suffix is display-only for disambiguation.
-
-### Debug panel (netlist + plan state)
-Open the sidebar expander **Debug / Netlist / Plan State** to verify netlist loading and plan state.
-- Test a net name to see VALID / NOT FOUND and the normalized form.
-- See netlist source, count, PP vs signal counts, cache path, and the top 50 nets preview.
-- Review the top non-PP (signal) nets list (and suffix-matched list) to sanity-check signal net extraction.
-- The debug panel also shows **Net→RefDes** index status and sample probe points for the test net.
-
-### Net → RefDes measurement points
-BoardBrain can suggest validated probe points (refdes) for a net using a boardview-derived index (preferred) or a KB-text fallback.
-- Ask: “Where can I probe PPBUS_AON?”
-- Command: `/points PPBUS_AON`
-If no points are available, it will ask for a schematic/boardview snippet and will not guess.
-Ranking preference (probe-friendly): TP/P > C > L > J > others, with connectors deprioritized.
-The index is stored at `data/net_refs/<board_id>.json`. When a boardview is available, it uses boardview truth; otherwise it falls back to co‑occurrence of nets + refdes in ingested KB text.
-Probe points shown in the UI are filtered to refdes that exist in the component index and ranked for probe‑friendliness.
-If no points exist for a net, the assistant will say so and label any advice as a generic fallback.
-Enable **Show machine JSON (debug)** in the Debug panel to view the raw JSON block when needed.
-Rebuild the index after new KB content:
-```bash
-python -m boardbrain.ingest
-```
-- Review current plan version and requested measurements.
-- Use **Copy debug report** to generate a plaintext report (clipboard copy or manual copy fallback).
-- The debug panel includes message classification, parsed measurements, invalid nets, net confirmation status, and auto-update reason.
-- It also shows rejected measurement reasons and net validation results.
-
-## Evidence / citations policy (schematic-first)
-For board-specific facts (rails/pins/expected voltages), BoardBrain will only respond when it has evidence:
-- case attachments: schematic page screenshots or boardview screenshots
-- KB retrieval hits from schematic/manual/datasheet text
-
-If evidence is missing, the assistant will refuse and ask for the exact schematic/boardview snippet.
-
-## Notes
-- If your schematics are selectable-text PDFs, ingesting them provides strong searchable evidence.
-- Many schematics are image-only; ingest will skip empty-text PDF pages. Use screenshots as case evidence.
-
-## Baselines (Known Good)
-Use the **Baselines** mode to store quick "known-good" reference measurements per board number (e.g. A2338 820-02020).
-These baselines are appended to the diagnostic context automatically.
-
-
-
-## Recommended KB layout (scales as you add devices)
-You said you prefer:
-
-`kb_raw/MacBook/A2338/820-02020/`
-
-That works great. Example:
-
-```
-kb_raw/
-  MacBook/
-    A2338/
-      820-02020/
-        schematic/
-          schematic.pdf
-        reference/
-          notes.md
-        boardview/
-          820-02020.bvr
-        boardview_screens/
-          PPBUS_AON.png
-          USB_C_PORT_A.png
-        notes/
-          triage.md
-```
-
-**Important:**
-- The ingester scans subfolders recursively.
-- Board-specific filtering works best when the **board number** (e.g. `820-02020`) appears in the folder path or filename.
-- For clean names, you can name the file simply `schematic.pdf` as long as the folder path includes the board number.
-
-Create folders + move your PDF:
+## Development and verification
 
 ```bash
-mkdir -p kb_raw/MacBook/A2338/820-02020
-mv "kb_raw/820-02020 schematic.pdf" "kb_raw/MacBook/A2338/820-02020/schematic.pdf"
-python -m boardbrain.ingest
+python3 -m pip install -r requirements-bench.txt
+python3 -m boardbrain_v2 --browser
+python3 -m unittest discover -s tests_v2 -v
+node --check boardbrain_v2/static/app.js
 ```
 
-## Boardview ingestion (.BVR)
-FlexBV `BVRAW_FORMAT_3` `.BVR` files are supported.
-Place the file here:
-```
-kb_raw/MacBook/<model>/<board_id>/boardview/<board_id>.bvr
-```
-Then run:
+Use `--data-dir /path/to/isolated/test-data --serve` for a test server. Its private
+`runtime.json` contains the ephemeral port and bearer token. Do not publish it.
+The browser workflow test requires Playwright and its Chromium installation:
+
 ```bash
-python -m boardbrain.ingest
+node tests_v2/ui_smoke.cjs /path/to/isolated/test-data/runtime.json
+node tests_v2/ui_documents.cjs /path/to/isolated/test-data/runtime.json
+node tests_v2/ui_grounding.cjs /path/to/isolated/test-data/runtime.json
 ```
-This creates (when parsing succeeds):
-- `data/boardviews/<board_id>.json` (boardview parse metadata)
-- `data/netlists/<board_id>.json` (boardview netlist, preferred source)
-- `data/components/<board_id>.json` (boardview component index)
-- `data/net_refs/<board_id>.json` (net → refdes measurement points)
 
-### Troubleshooting BVR parsing
-- Confirm the file is a real FlexBV `.BVR` (magic `BVR`/`BVR2`), not a renamed export.
-- Ensure the board ID (e.g., `820-02020`) appears in the folder path or filename so it can be discovered.
-- If parsing fails, delete `data/boardviews/<board_id>.json`, `data/netlists/<board_id>.json`, and `data/net_refs/<board_id>.json`, then re-run ingest.
-- Check the ingest console output for `[boardview]` errors.
- - The Debug panel shows the boardview parser name and parse status. Source should read `boardview_bvraw3` on success.
-
-### Truth source selection
-- When a boardview parse succeeds, BoardBrain treats it as the primary truth source for netlists, components, and net→refdes mappings.
-- If parsing fails, caches are not overwritten and the Debug panel will show the exact parse error and fallback reason.
-
-## Requested Measurements JSON block (required)
-Plans must include a machine‑readable JSON block at the end:
-```
----REQUESTED_MEASUREMENTS_JSON---
-{ "requested_measurements": [
-  {
-    "key": "CHECK_PPBUS_AON",
-    "net": "PPBUS_AON",
-    "type": "voltage",
-    "prompt": "Measure PPBUS_AON to GND",
-    "hint": "Use TP or large cap pad"
-  }
-] }
----END_REQUESTED_MEASUREMENTS_JSON---
-```
-If JSON parsing fails, BoardBrain will fall back to the legacy `KEY:`/`PROMPT:` parsing. If both methods fail, the previous requested‑measurements list is preserved (not cleared).
+The tests use synthetic fixtures and a fake model transport. Customer boardviews,
+private case data and API keys must not be committed to this public repository.
