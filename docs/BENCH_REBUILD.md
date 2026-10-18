@@ -205,6 +205,14 @@ backup database with unrelated old WAL/SHM files.
 
 ## Verification recorded for this draft
 
+- Setup revision 2 accepts an existing native Python 3.14 and checks python.org,
+  Homebrew and PATH locations, including versioned executables. The old 3.13-only
+  prerequisite message was misleading for an installed 3.14. Dependency floors
+  were raised for image handling, the native window and app packaging.
+  On Linux Python 3.14.8, installation of the build requirements, all 52 tests,
+  the HTTP workflow and the supplied reference-pair import passed. Python 3.12
+  also passed all 52 tests. CI now includes 3.14 and uses it for the Mac build;
+  these checks do not establish native macOS window or Keychain compatibility.
 - 52 local Python tests passed on 2026-10-18, including Astra routing with the same
   case evidence, per-model cost settlement, budget rejection before any request,
   network uncertainty without fallback, and evidence rejection for both models.

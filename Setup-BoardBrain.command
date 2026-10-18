@@ -4,6 +4,7 @@ cd "$(dirname "$0")"
 umask 077
 BB_LOG="$PWD/BoardBrain-Setup.log"
 exec > >(tee "$BB_LOG") 2>&1
+echo 'BoardBrain setup 0.2.1, revision 2 — Python 3.14 supported.'
 finish() {
     status=$?
     if [[ $status -ne 0 ]]; then
@@ -30,16 +31,36 @@ if ! /usr/bin/xcode-select -p >/dev/null 2>&1; then
     exit 1
 fi
 BB_PYTHON=''
-for candidate in /Library/Frameworks/Python.framework/Versions/{3.13,3.12,3.11}/bin/python3 /opt/homebrew/bin/python3.13 /opt/homebrew/bin/python3.12 /opt/homebrew/bin/python3.11 /opt/homebrew/bin/python3 /usr/local/bin/python3; do
-    if [[ -x "$candidate" ]] && "$candidate" -c 'import platform,sys; assert (3,11) <= sys.version_info < (3,14) and platform.machine() == "arm64"' 2>/dev/null; then
+# Finder launches may have a shorter PATH than an interactive terminal.
+# Check the versioned python.org and Homebrew paths as well as the user's PATH.
+BB_CANDIDATES=(
+    /Library/Frameworks/Python.framework/Versions/{3.14,3.13,3.12,3.11}/bin/python3
+    /Library/Frameworks/Python.framework/Versions/3.14/bin/python3.14
+    /opt/homebrew/bin/python3.14 /opt/homebrew/bin/python3.13
+    /opt/homebrew/bin/python3.12 /opt/homebrew/bin/python3.11
+    /opt/homebrew/opt/python@3.14/bin/python3.14
+    /opt/homebrew/bin/python3 /usr/local/bin/python3.14 /usr/local/bin/python3
+)
+for name in python3.14 python3.13 python3.12 python3.11 python3; do
+    BB_CANDIDATE="$(command -v "$name" 2>/dev/null || true)"
+    if [[ -n "$BB_CANDIDATE" && "$BB_CANDIDATE" != /usr/bin/python3 ]]; then
+        BB_CANDIDATES+=("$BB_CANDIDATE")
+    fi
+done
+for candidate in "${BB_CANDIDATES[@]}"; do
+    if [[ ! -x "$candidate" ]]; then continue; fi
+    if BB_DETECTED="$("$candidate" -c 'import platform,sys; print("Python",platform.python_version(),platform.machine()); raise SystemExit(0 if (3,11) <= sys.version_info < (3,15) and platform.machine() == "arm64" else 1)' 2>&1)"; then
         BB_PYTHON="$candidate"
+        echo "Using $BB_DETECTED at $BB_PYTHON"
         break
+    else
+        echo "Skipped $candidate: $BB_DETECTED"
     fi
 done
 if [[ -z "$BB_PYTHON" ]]; then
-    echo 'One-time prerequisite: install Python 3.13 using its macOS installer.'
-    echo 'The official download page is opening. After installation, double-click Setup-BoardBrain.command again.'
-    /usr/bin/open 'https://www.python.org/downloads/release/python-31316/'
+    echo 'Setup could not find a native Apple Silicon Python 3.11, 3.12, 3.13 or 3.14.'
+    echo 'If Python is already installed, send this log so its location or architecture can be checked.'
+    echo 'For a new installation, use the Python 3.14 macOS installer at https://www.python.org/downloads/macos/.'
     exit 1
 fi
 "$BB_PYTHON" - <<'PY'
@@ -58,6 +79,7 @@ echo '1 of 5 — Preparing an isolated build environment.'
 BB_BUILD_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/boardbrain-build.XXXXXX")"
 "$BB_PYTHON" -m venv "$BB_BUILD_ROOT/venv"
 BB_PYTHON="$BB_BUILD_ROOT/venv/bin/python3"
+"$BB_PYTHON" -m pip install --disable-pip-version-check --upgrade pip
 "$BB_PYTHON" -m pip install --disable-pip-version-check -r requirements-build.txt
 
 echo '2 of 5 — Checking the app and building the Apple Silicon application.'

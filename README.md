@@ -25,9 +25,13 @@ included private reference bundle if present, and installs it in
 `~/Applications/BoardBrain.app`. It then opens the app and reveals it in Finder.
 Keep it in the Dock. No typed Terminal commands are needed.
 
-Setup uses an existing native Python 3.11–3.13 installation. If one is missing,
-it opens the official [Python 3.13 installer page](https://www.python.org/downloads/release/python-31316/).
-Install its macOS package, then double-click setup again. Network access is needed
+Setup uses an existing native Python 3.11–3.14 installation. Python 3.14 is
+accepted from python.org, Homebrew, or the user's PATH. The log
+records the selected interpreter and explains skipped installations. If none is
+found, it reports the supported range and requests the log when Python is already
+installed, instead of sending the user to install an older version. A new
+installation can use Python 3.14 from the
+[official Mac downloads](https://www.python.org/downloads/macos/). Network access is needed
 for the one-time dependency installation. If Apple Command Line Tools are missing,
 setup opens Apple's installer; finish that installation and rerun setup. The full
 Xcode application is not needed. The app runs independently of that

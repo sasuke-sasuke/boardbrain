@@ -1,18 +1,21 @@
 name: BoardBrain bench preview
 on:
   pull_request:
-    paths: ['boardbrain_v2/**', 'tests_v2/**', 'packaging/**', 'requirements-bench.txt', 'requirements-build.txt', '.github/workflows/bench-preview.yml']
+    paths: ['boardbrain_v2/**', 'tests_v2/**', 'packaging/**', 'requirements-bench.txt', 'requirements-build.txt', 'Setup-BoardBrain.command', 'Build-BoardBrain.command', '.github/workflows/bench-preview.yml']
   workflow_dispatch:
 permissions:
   contents: read
 jobs:
   verify:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ['3.12', '3.14']
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          python-version: ${{ matrix.python-version }}
       - run: python -m pip install -r requirements-bench.txt
       - run: python -m unittest discover -s tests_v2 -v
       - run: python -m compileall -q boardbrain_v2
@@ -32,7 +35,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: Bench-UI-check
+          name: Bench-UI-check-${{ matrix.python-version }}
           path: ${{ runner.temp }}/bench-ui.png
   mac-app:
     needs: verify
@@ -41,7 +44,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          python-version: '3.14'
           architecture: arm64
       - run: python -m pip install -r requirements-build.txt
       - run: python -m unittest discover -s tests_v2 -v
