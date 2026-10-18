@@ -4,7 +4,7 @@ cd "$(dirname "$0")"
 umask 077
 BB_LOG="$PWD/BoardBrain-Setup.log"
 exec > >(tee "$BB_LOG") 2>&1
-echo 'BoardBrain setup 0.2.1, revision 2 — Python 3.14 supported.'
+echo 'BoardBrain setup 0.2.1, revision 3 — Python 3.14 and Mac signing fix.'
 finish() {
     status=$?
     if [[ $status -ne 0 ]]; then
@@ -84,22 +84,23 @@ BB_PYTHON="$BB_BUILD_ROOT/venv/bin/python3"
 
 echo '2 of 5 — Checking the app and building the Apple Silicon application.'
 "$BB_PYTHON" -m unittest discover -s tests_v2 -q
-PATH="$BB_BUILD_ROOT/venv/bin:$PATH" bash packaging/build_macos.sh
+PATH="$BB_BUILD_ROOT/venv/bin:$PATH" bash packaging/build_macos.sh "$BB_BUILD_ROOT/package"
+BB_APP="$BB_BUILD_ROOT/package/dist/BoardBrain.app"
 
 echo '3 of 5 — Checking the packaged app, PDF renderer, photo import and reference search.'
-"$BB_PYTHON" tests_v2/smoke_packaged.py "$PWD/dist/BoardBrain.app/Contents/MacOS/BoardBrain"
+"$BB_PYTHON" tests_v2/smoke_packaged.py "$BB_APP/Contents/MacOS/BoardBrain"
 
 echo '4 of 5 — Preparing your reference workspace.'
 if [[ -f reference-bundle/manifest.json ]]; then
-    "$PWD/dist/BoardBrain.app/Contents/MacOS/BoardBrain" --import-reference "$PWD/reference-bundle/manifest.json"
+    "$BB_APP/Contents/MacOS/BoardBrain" --import-reference "$PWD/reference-bundle/manifest.json"
 fi
 
 echo '5 of 5 — Installing and opening BoardBrain.'
 BB_APPS="$HOME/Applications"
 mkdir -p "$BB_APPS"
 BB_STAGE="$(mktemp -d "$BB_APPS/.boardbrain-install.XXXXXX")"
-/usr/bin/ditto "$PWD/dist/BoardBrain.app" "$BB_STAGE/BoardBrain.app"
-/usr/bin/codesign --verify --deep --strict "$BB_STAGE/BoardBrain.app"
+/usr/bin/ditto "$BB_APP" "$BB_STAGE/BoardBrain.app"
+"$BB_PYTHON" packaging/macos_bundle.py "$BB_STAGE/BoardBrain.app"
 BB_PREVIOUS=''
 if [[ -e "$BB_APPS/BoardBrain.app" ]]; then
     BB_PREVIOUS="$BB_APPS/BoardBrain-Previous-$(date +%Y%m%d-%H%M%S).app"

@@ -205,6 +205,19 @@ backup database with unrelated old WAL/SHM files.
 
 ## Verification recorded for this draft
 
+- Setup revision 3 handles signing-blocking Finder/resource-fork metadata.
+  Setup now writes build/spec/dist output in a private temporary
+  directory and cleans only the two blocking attributes on generated app copies.
+  The bundle is explicitly ad-hoc signed and strictly verified both after build
+  and after the installation copy. No source files, existing app, case data,
+  quarantine attributes or global security settings are changed by cleanup.
+  Signing errors still stop installation. Four portable regression checks cover
+  cleanup scope, symlinks, idempotency and failure propagation. A fifth test uses
+  native macOS xattr/codesign with a synthetic bundle to reproduce and repair the
+  reported failure; it is skipped on Linux and runs during Mac setup and Mac CI.
+  Final local check: 57 collected, 56 passed, one native-Mac test skipped on
+  Linux Python 3.14.8; setup/build shell syntax checks passed. Native signing of
+  this revision remains unverified until it runs on macOS.
 - Setup revision 2 accepts an existing native Python 3.14 and checks python.org,
   Homebrew and PATH locations, including versioned executables. The old 3.13-only
   prerequisite message was misleading for an installed 3.14. Dependency floors
@@ -240,6 +253,8 @@ backup database with unrelated old WAL/SHM files.
 
 ## Primary references used
 
+- [Apple QA1940: signing-blocking Finder/resource-fork metadata](https://developer.apple.com/library/archive/qa/qa1940/_index.html)
+- [PyInstaller macOS code signing](https://pyinstaller.org/en/stable/feature-notes.html#macos-binary-code-signing)
 - [OpenBoardView BVR3 field semantics](https://github.com/OpenBoardView/OpenBoardView/blob/master/src/openboardview/FileFormats/BVR3File.cpp)
 - [FlexBV manual](https://pldaniels.com/flexbv5/manual/flexbv-manual.html)
 - [PyMuPDF OCR](https://pymupdf.readthedocs.io/en/latest/recipes-ocr.html)

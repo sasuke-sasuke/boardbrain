@@ -35,7 +35,9 @@ installation can use Python 3.14 from the
 for the one-time dependency installation. If Apple Command Line Tools are missing,
 setup opens Apple's installer; finish that installation and rerun setup. The full
 Xcode application is not needed. The app runs independently of that
-build environment afterward. If setup stops, its `BoardBrain-Setup.log` records
+build environment afterward. Setup revision 3 builds in a private temporary
+directory, removes signing-blocking Finder/resource-fork metadata from the built
+app, then signs and strictly verifies it before installation. If setup stops, its `BoardBrain-Setup.log` records
 the failure; do not include an API key when sharing a log.
 
 This is a development preview, not a notarized installer. If macOS blocks the
