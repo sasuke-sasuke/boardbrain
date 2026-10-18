@@ -20,7 +20,8 @@ from .store import Store, dumps, require_text
 # estimate, never a promise about the account's invoice or other applications.
 PRICES = {"gpt-6.1-sol": (2.5, 10.0), "gpt-6-astra": (12.5, 50.0), "gpt-5.4": (2.5, 15.0)}
 DEEP_MODEL = "gpt-6-astra"
-MAX_ROUNDS = 3
+MAX_ROUNDS = 6
+MAX_INSPECTIONS = 4
 MAX_OUTPUT = 6000
 RESERVE_PER_TURN = 3.0
 DEEP_RESERVE_PER_TURN = 15.0
@@ -110,7 +111,12 @@ TEST_SCHEMA = obj({
     "expected_evidence_id": STRING, "expected_quote": STRING,
     "interpretation": STRING, "stop_if": STRING, "evidence_ids": STRINGS,
 })
-PLAN_SCHEMA = obj({"summary": STRING,
+CLAIM_SCHEMA = obj({
+    "kind": {"type": "string", "enum": ["pin_connection", "document_fact", "visual_observation", "inference", "general", "unknown"]},
+    "text": STRING, "quote": STRING, "evidence_ids": STRINGS,
+    "ref": STRING, "pin": STRING, "net": STRING,
+})
+PLAN_SCHEMA = obj({"summary": STRING, "claims": {"type": "array", "items": CLAIM_SCHEMA},
                    "hypotheses": {"type": "array", "items": obj({"idea": STRING, "support": STRINGS, "contradictions": STRINGS})},
                    "tests": {"type": "array", "items": TEST_SCHEMA},
                    "questions": STRINGS,
@@ -121,6 +127,10 @@ TOOLS = [{"type": "function", "name": name, "description": description, "strict"
     ("lookup_evidence", "Search ONLY this case for an exact net, component, component.pin, or document phrase. Preserve + - # !. Returns source ids and conflicts. PDFs/OCR do not prove pin connectivity. No wildcard search."),
     ("search_confirmed_cases", "Find technician-confirmed repair outcomes. Comparisons only, even on the same board revision; they do not prove this fault or this board's wiring."),
 )]
+TOOLS.append({"type": "function", "name": "inspect_schematic", "strict": True,
+              "description": "Inspect an actual PDF page image from this case. Use source_id from the file list or lookup. page is the PDF page, NOT sheet number. region=[] and focus='' returns the whole page; focus='U1' requests a contextual enlargement around an exact native-text label; alternatively region=[left,top,right,bottom] uses fractions of the displayed page (0..1). Do not combine focus and region. Ambiguous/missing focus returns an error; use the overview and explicit region. At most four views per question. An image is evidence for visual observations, not a checked physical pin mapping.",
+              "parameters": obj({"source_id": STRING, "page": {"type": "integer", "minimum": 1},
+                                 "region": {"type": "array", "items": {"type": "number"}}, "focus": STRING})})
 
 SYSTEM = """You are BoardBrain, a board-repair bench assistant. Help a technician
 choose the next useful test quickly. Be concise, practical, and honest about missing
@@ -137,9 +147,33 @@ Answer document and connectivity questions using retrieved evidence. Return empt
 tests and hypotheses arrays; never invent measurements or request an outcome.
 Do not invent numeric confidence. Discuss supporting and contradicting evidence.
 
+Put the answer in at most 6 concise claims, not a long summary. Each claim has a
+kind, text, quote, evidence_ids, ref, pin and net. Leave inapplicable fields empty.
+Use pin_connection for an exact imported/checked mapping: cite its pin evidence
+and copy ref, original numeric pin and net exactly. Its displayed text is built
+from that record; do not add electrical conclusions there. File reference answers
+may describe unconfirmed records, but must not call them physically verified.
+Use document_fact only with a short exact quote from retrieved document text;
+text explains its limited meaning. Use visual_observation for what an image
+actually shows, citing the image evidence ID returned by inspect_schematic or a
+selected photo. Use inference for reasoning from cited evidence, general for a
+general principle without board-specific claims, and unknown for information
+not established. Never disguise a file fact as general knowledge to avoid a
+citation. A cited source must support the associated claim, not just be present.
+Keep raw evidence/source IDs out of prose: the app renders readable source links.
+Summary is only a brief introduction; factual content belongs in claims.
+
 When a matching schematic is available, look up its relevant page before making
-a board-specific electrical claim. Read the returned source text; the presence of
-an attachment is not a schematic check. PDF page and schematic sheet/CSA numbers
+a board-specific electrical claim. Read the returned source text and use
+inspect_schematic before explaining drawn connections, circuit topology or symbol
+relationships. Inspect a full page for context and a focused/enlarged region for
+small labels and junctions. A whole-page overview may not resolve dense wiring.
+Do not treat crossed lines as junctions unless visible, or a crop as the complete
+net. Say what is unreadable or cut off. Seeing an image does not certify your
+interpretation. If an inspection fails, correct the page/region or say what is
+missing; never claim to have seen that image. For image-only PDFs use the listed
+page count and inspect_schematic even when text lookup has no results.
+An attachment or prior answer is not a current schematic check. PDF page and schematic sheet/CSA numbers
 are different: use the returned labels and actual PDF page for citations.
 Partial imports have excluded component records. Never guess their mappings or
 claim that a partial/truncated lookup lists every connection on a net. A pin's
@@ -197,7 +231,7 @@ def _safe_url(url):
     return p.scheme in ("https", "http") and bool(p.hostname) and not p.username and p.hostname not in ("localhost", "127.0.0.1", "::1")
 
 
-def validate_plan(plan: dict, evidence: dict, web_urls: set[str]) -> dict:
+def validate_plan(plan: dict, evidence: dict, web_urls: set[str], *, require_claims=False) -> dict:
     """Validate structure AND identities. Semantic diagnosis still needs bench eval."""
     def validate(value, schema):
         typ = schema["type"]
@@ -214,6 +248,43 @@ def validate_plan(plan: dict, evidence: dict, web_urls: set[str]) -> dict:
         elif not isinstance(value, str) or len(value) > 6000 or ("enum" in schema and value not in schema["enum"]):
             raise ValueError("The assistant returned an invalid field.")
     validate(plan, PLAN_SCHEMA)
+    if len(plan["claims"]) > 6 or (require_claims and not plan["claims"]):
+        raise ValueError("The reference answer needs concise source-linked claims. No unsupported answer was saved.")
+    for claim in plan["claims"]:
+        kind, ids = claim["kind"], claim["evidence_ids"]
+        if len(ids) > 8 or len(set(ids)) != len(ids) or any(i not in evidence for i in ids):
+            raise ValueError("An answer cited evidence that was not supplied in this request.")
+        facts = [evidence[i] for i in ids]
+        if not claim["text"].strip() or len(claim["text"]) > 1800:
+            raise ValueError("The assistant returned an empty or oversized claim.")
+        if kind == "pin_connection":
+            pins = [e for e in facts if e.get("kind") == "pin" and
+                    all(e.get("data", {}).get(k) == claim[k] for k in ("ref", "pin", "net"))]
+            if not pins or any(e.get("conflict") or e.get("alias_ambiguous") for e in pins):
+                raise ValueError("The answer's pin connection does not match unambiguous source evidence.")
+            pin = pins[0]
+            d = pin["data"]
+            origin = "The imported boardview records" if pin.get("source_id") else "The technician's checked mapping records"
+            claim["text"] = f"{origin} {d['ref']}.{d.get('name') or d['pin']} connected to {d['net']}."
+        elif any(claim[k] for k in ("ref", "pin", "net")):
+            raise ValueError("Exact pin mappings must use a source-checked pin connection claim.")
+        if kind == "document_fact":
+            quote = claim["quote"].strip()
+            docs = [e for e in facts if e.get("kind") == "document" and quote in e.get("data", {}).get("text", "")]
+            if not quote or len(quote) > 400 or not docs:
+                raise ValueError("A document claim needs an exact excerpt from the retrieved page.")
+            if all(e.get("data", {}).get("method") != "native_text" for e in docs) and not any(
+                    v.get("kind") == "document_image" and any(v.get("source_id") == d.get("source_id") and
+                    v.get("data", {}).get("page") == d.get("data", {}).get("page") for d in docs) for v in facts):
+                raise ValueError("An OCR excerpt needs its actual page image in the cited evidence.")
+        elif claim["quote"]:
+            raise ValueError("Only document claims can present a source quotation.")
+        if kind == "visual_observation" and not any(e.get("kind") in ("document_image", "photo") for e in facts):
+            raise ValueError("A visual claim needs an image supplied in this request.")
+        if kind == "inference" and not facts:
+            raise ValueError("An interpretation needs its supporting evidence.")
+        if (kind == "general" or (kind == "unknown" and not facts)) and re.search(r"\b(?:U|R|C|L|Q|D|J|F|TP)\d{1,6}(?:\.[A-Za-z0-9]+)?\b|\b[A-Z][A-Z0-9]*_[A-Z0-9_+#-]+\b", claim["text"]):
+            raise ValueError("A board-specific claim was presented without source evidence.")
     if any(len(plan[k]) > 3 for k in ("tests", "hypotheses", "questions")):
         raise ValueError("The assistant returned too many steps; no plan was accepted.")
     for hypothesis in plan["hypotheses"]:
@@ -258,6 +329,15 @@ def validate_plan(plan: dict, evidence: dict, web_urls: set[str]) -> dict:
         if refs - allowed:
             raise ValueError("The procedure introduced a component that lacks checked evidence.")
     return plan
+
+
+def input_text_bytes(value):
+    """Bound text context without counting base64 pixels as text tokens."""
+    if isinstance(value, dict):
+        return sum(input_text_bytes(v) for k, v in value.items() if k != "image_url")
+    if isinstance(value, list):
+        return sum(input_text_bytes(v) for v in value)
+    return len(str(value).encode())
 
 
 class Assistant:
@@ -331,6 +411,11 @@ class Assistant:
         self.store.event(case_id, "message", {"role": "user", "text": question, "photo_ids": photo_ids, "research": research, "request_id": request_id, **route})
         provider = self.provider_factory(key)
         cost, uncertain, records, web_urls = 0.0, False, [], set()
+        lookups, inspections = [], []
+        inspection_attempts = 0
+        # An answer about attached files must actually retrieve them during this
+        # request. Neither old model prose nor a file-list entry counts as a read.
+        require_lookup = bool(case["sources"])
         started = time.monotonic()
         try:
             for turn in range(MAX_ROUNDS):
@@ -338,8 +423,7 @@ class Assistant:
                     raise InterruptedError()
                 # Text bytes are a conservative bound on tokens; image and hosted
                 # search tokens are reserved separately. Refuse oversize histories.
-                text_bytes = sum(len(str(x.get("text", "")).encode()) for item in inputs if isinstance(item.get("content"), list) for x in item["content"])
-                text_bytes += sum(len(dumps(item).encode()) for item in inputs if not isinstance(item.get("content"), list))
+                text_bytes = input_text_bytes(inputs)
                 if text_bytes > 100000:
                     raise ValueError("This case's context is too large for the preview. Narrow the question or start a related case; your history is preserved.")
                 progress(f"{model} · " + ("Checking the case and evidence…" if turn == 0 else "Comparing the retrieved evidence…"))
@@ -347,11 +431,16 @@ class Assistant:
                            "store": False, "service_tier": "default", "max_output_tokens": 12000 if deep_analysis else MAX_OUTPUT, "max_tool_calls": 2,
                            "reasoning": {"effort": effort},
                            "text": {"format": {"type": "json_schema", "name": "bench_plan", "strict": True, "schema": PLAN_SCHEMA}},
-                           "tools": tools, "parallel_tool_calls": False}
+                           "tools": tools, "parallel_tool_calls": False,
+                           "include": ["reasoning.encrypted_content"]}
                 if research:
-                    payload["include"] = ["web_search_call.action.sources"]
-                    if turn == 0:
+                    payload["include"].append("web_search_call.action.sources")
+                    if turn == 0 and not require_lookup:
                         payload["tool_choice"] = {"type": "web_search"}
+                if require_lookup and not lookups:
+                    payload["tool_choice"] = {"type": "function", "name": "lookup_evidence"}
+                elif turn == MAX_ROUNDS - 1:
+                    payload["tool_choice"] = "none"
                 response = provider.respond(payload)
                 usage = response.get("usage")
                 if not isinstance(usage, dict) or not all(isinstance(usage.get(k), int) and usage[k] >= 0 for k in ("input_tokens", "output_tokens")):
@@ -383,22 +472,53 @@ class Assistant:
                 if calls:
                     inputs.extend(output)
                     for call in calls:
-                        args = json.loads(call["arguments"])
-                        query = require_text(args.get("query"), "Lookup", 200)
-                        if call["name"] == "lookup_evidence":
-                            found = self.store.lookup(case_id, query, limit=15)
-                            evidence.update({item["id"]: item for item in found})
-                            result = found
-                        elif call["name"] == "search_confirmed_cases":
-                            result = self.store.confirmed_cases(case_id, query)
-                        else:
+                        if cancel.is_set():
+                            raise InterruptedError()
+                        if call["name"] not in ("lookup_evidence", "search_confirmed_cases", "inspect_schematic"):
                             raise ValueError("The model requested an unavailable tool.")
-                        inputs.append({"type": "function_call_output", "call_id": call["call_id"], "output": dumps(result)})
+                        try:
+                            args = json.loads(call["arguments"])
+                            if not isinstance(args, dict):
+                                raise ValueError("Tool arguments must be an object.")
+                            if call["name"] == "inspect_schematic":
+                                from .schematic import inspect_page
+                                inspection_attempts += 1
+                                if inspection_attempts > MAX_INSPECTIONS:
+                                    raise ValueError("Image limit reached. Use the supplied views and explain what remains unreadable.")
+                                progress(f"{model} · Inspecting schematic PDF page {args.get('page', '?')}…")
+                                view, png = inspect_page(self.store, case_id, args.get("source_id", ""),
+                                                         args.get("page"), args.get("region"), args.get("focus", ""))
+                                if cancel.is_set():
+                                    raise InterruptedError()
+                                evidence[view["id"]] = view
+                                inspections.append(view["id"])
+                                result = [{"type": "input_text", "text": dumps(view)},
+                                          {"type": "input_image", "image_url": "data:image/png;base64," + base64.b64encode(png).decode(), "detail": "high"}]
+                            else:
+                                query = require_text(args.get("query"), "Lookup", 200)
+                                if call["name"] == "lookup_evidence":
+                                    found = self.store.lookup(case_id, query, limit=15)
+                                    evidence.update({item["id"]: item for item in found})
+                                    lookups.append({"query": query, "result_ids": [item["id"] for item in found]})
+                                    result = dumps(found)
+                                else:
+                                    result = dumps(self.store.confirmed_cases(case_id, query))
+                        except (ValueError, TypeError) as exc:
+                            # A missing/ambiguous label is a recoverable tool result,
+                            # never permission to fabricate an image or its contents.
+                            result = dumps({"error": str(exc)[:600], "evidence_supplied": False})
+                        inputs.append({"type": "function_call_output", "call_id": call["call_id"], "output": result})
                     continue
                 text = "".join(part.get("text", "") for item in output if item.get("type") == "message" for part in item.get("content", []) if part.get("type") == "output_text")
-                plan = validate_plan(json.loads(text), evidence, web_urls)
+                if require_lookup and not lookups:
+                    raise ValueError("The assistant did not retrieve the attached files. No unsupported answer was saved.")
+                plan = validate_plan(json.loads(text), evidence, web_urls, require_claims=case["kind"] == "reference")
                 if case["kind"] == "reference" and (plan["tests"] or plan["hypotheses"]):
                     raise ValueError("The assistant treated reference files as an active repair. No repair plan was saved. Ask a specific document question.")
+                if case["kind"] == "reference":
+                    # Do not preserve/display unvalidated reference prose as a
+                    # second answer outside the structured source-linked claims.
+                    plan["summary"] = "\n\n".join(c["text"] for c in plan["claims"])
                 # Observations/source imports may have changed during the network
                 # call. Keep the response but mark it stale rather than silently
                 # calling it the next current action.
@@ -407,7 +527,9 @@ class Assistant:
                 after_ids = {e["id"] for e in current["events"] if not e["retracted"] and e["kind"] in ("measurement", "pin", "note", "outcome")}
                 stale = before_ids != after_ids or case["sources"] != current["sources"]
                 saved = self.store.event(case_id, "plan", {"plan": plan, "evidence": evidence, "request_id": request_id, "estimated_cost": cost, "coverage": context["coverage"], "stale": stale,
-                                                           **route, "elapsed_seconds": round(time.monotonic() - started, 3)})
+                                                           **route, "answer_version": 2,
+                                                           "retrieval": {"lookups": lookups, "inspections": inspections},
+                                                           "elapsed_seconds": round(time.monotonic() - started, 3)})
                 return {"plan_id": saved["id"], "estimated_cost": cost, "stale": stale, **route}
             raise ValueError("The assistant reached its lookup limit. No speculative plan was accepted. Ask a narrower question.")
         except ProviderError as exc:

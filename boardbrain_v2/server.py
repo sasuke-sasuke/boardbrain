@@ -124,6 +124,17 @@ class App:
         raise LookupError("Endpoint not found")
 
     def binary(self, path, query):
+        if path == "/api/inspection":
+            from .schematic import render_inspection
+            case_id, evidence_id = query.get("case_id", [""])[0], query.get("id", [""])[0]
+            case = self.store.case(case_id)
+            for event in reversed(case["events"]):
+                if event["kind"] != "plan":
+                    continue
+                view = event["data"].get("evidence", {}).get(evidence_id)
+                if view and view.get("kind") == "document_image":
+                    return render_inspection(self.store, case_id, view), "image/png"
+            raise ValueError("Inspected image not found in this case")
         if path == "/api/backup-file":
             filename = query.get("name", [""])[0]
             if Path(filename).name != filename or not filename.endswith(".zip"):

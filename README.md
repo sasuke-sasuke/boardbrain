@@ -102,6 +102,19 @@ to inspect the drawing. Higher zoom requests a sharper image; scroll to pan.
 Supported native contents tables supply separate PDF page and schematic sheet
 labels. Those numbers can differ; the viewer's page entry uses the PDF number.
 
+Version 0.2.3 lets the assistant request actual PDF page images and enlarged
+sections during a question. It can use an exact native-text label or a normalized
+page region, with a limit of four views and six model rounds. No whole-document
+image upload runs automatically. Click an image citation to inspect the exact
+view supplied to the model, then **Open full page** for its surrounding circuit.
+
+Answers distinguish recorded pin connections, quoted document text, visual
+observations, interpretations, general principles and unknowns. Attached-file
+questions require a fresh lookup; reference answers use validated claim records
+instead of an unrestricted summary. Citation identity, pin fields and quoted
+text are checked in code. These checks do not prove that a visual interpretation
+or an inference is correct; real-model and bench validation remain necessary.
+
 The new runtime uses a separate data directory/database. It leaves the old data
 and legacy app intact. See [the rebuild notes](docs/BENCH_REBUILD.md) for evidence
 rules, limitations, backup/restore, research sources and the real-board acceptance
@@ -123,6 +136,7 @@ The browser workflow test requires Playwright and its Chromium installation:
 ```bash
 node tests_v2/ui_smoke.cjs /path/to/isolated/test-data/runtime.json
 node tests_v2/ui_documents.cjs /path/to/isolated/test-data/runtime.json
+node tests_v2/ui_grounding.cjs /path/to/isolated/test-data/runtime.json
 ```
 
 The tests use synthetic fixtures and a fake model transport. Customer boardviews,

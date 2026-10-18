@@ -4,7 +4,7 @@ cd "$(dirname "$0")"
 umask 077
 BB_LOG="$PWD/BoardBrain-Setup.log"
 exec > >(tee "$BB_LOG") 2>&1
-echo 'BoardBrain setup 0.2.2, revision 4 — schematic viewer and readable pin details.'
+echo 'BoardBrain setup 0.2.3, revision 5 — schematic image access and source-linked answers.'
 finish() {
     status=$?
     if [[ $status -ne 0 ]]; then

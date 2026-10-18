@@ -188,6 +188,30 @@ backup database with unrelated old WAL/SHM files.
 
 ## Verification recorded for this draft
 
+- Version 0.2.3 / setup revision 5 adds bounded PDF image inspection to the AI
+  tool loop: full pages, exact native-label focus, and normalized regions.
+  Images are rendered at up to 2,000 pixels on the longest edge, with at most
+  four inspection attempts and six model rounds per question. Image-only PDFs
+  can be inspected by page number without requiring searchable text. Ambiguous
+  labels require an explicit region; rotated pages support full/manual regions
+  but reject native-label focus. Source, page, region, renderer version and
+  pixel hash are recorded. Image citations replay only if those checks still
+  match; a renderer upgrade can require reinspection. Base64 pixels are not
+  stored in case history or backups.
+  Attached-file requests force a fresh evidence lookup. Reference summaries are
+  built from structured claims. Exact pin fields, source IDs and document quotes
+  are validated; visual claims require a current-request image, and OCR excerpts
+  need the corresponding image. These gates do not establish semantic accuracy
+  of interpretations, prevent every possible misleading statement, or replace
+  the checked question set and supervised repair gates.
+  Local validation on Python 3.14.8: 81 portable tests passed; one native Mac
+  signing test remains skipped. All three Chromium 140 workflows passed. New
+  coverage checks actual PNG content in the provider request, case isolation,
+  stale/missing citations, exact pin fields, image limits, error recovery,
+  rotated/cropped rendering, source integrity, image replay and the claim UI.
+  Provider responses in these checks are synthetic. Native Mac and live image
+  interpretation acceptance are still required; no new model performance claim
+  is made by these tests.
 - Version 0.2.2 / setup revision 4 adds a large schematic viewer with page
   navigation, zoom, sharper rendering at higher magnification, scrolling and
   original-PDF opening. Pin results show the component, label, connected net,
@@ -247,6 +271,8 @@ backup database with unrelated old WAL/SHM files.
 
 ## Primary references used
 
+- [Responses API input/output content types](https://developers.openai.com/api/reference/resources/responses/methods/create)
+- [OpenAI image inputs and vision limitations](https://developers.openai.com/api/docs/guides/images-vision)
 - [Apple QA1940: signing-blocking Finder/resource-fork metadata](https://developer.apple.com/library/archive/qa/qa1940/_index.html)
 - [PyInstaller macOS code signing](https://pyinstaller.org/en/stable/feature-notes.html#macos-binary-code-signing)
 - [OpenBoardView BVR3 field semantics](https://github.com/OpenBoardView/OpenBoardView/blob/master/src/openboardview/FileFormats/BVR3File.cpp)

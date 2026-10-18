@@ -98,10 +98,13 @@ class ReferenceTests(unittest.TestCase):
     def test_reference_answer_is_not_saved_as_a_repair_plan(self):
         ref = import_reference_bundle(self.store, self.bundle())
         recorded = []
-        answer = {"summary": "This is reference material.", "tests": [], "hypotheses": [], "questions": [], "web_sources": []}
+        answer = {"summary": "This is reference material.", "tests": [], "hypotheses": [], "questions": [], "web_sources": [], "claims": [{"kind":"unknown","text":"This is reference material; a specific file question is needed.","quote":"","evidence_ids":[],"ref":"","pin":"","net":""}]}
         class Provider:
             def respond(_, payload):
                 recorded.append(payload)
+                if not any(i.get("type") == "function_call_output" for i in payload["input"]):
+                    return {"id":"fake_lookup","status":"completed","usage":{"input_tokens":10,"output_tokens":10},
+                            "output":[{"type":"function_call","name":"lookup_evidence","call_id":"ref_lookup","arguments":json.dumps({"query":"U1.1"})}]}
                 return {"id": "fake", "status": "completed", "usage": {"input_tokens": 10, "output_tokens": 10},
                         "output": [{"type": "message", "content": [{"type": "output_text", "text": json.dumps(answer)}]}]}
         assistant = Assistant(self.store, type("Keys", (), {"get": lambda _: "fake"})(), lambda _: Provider())

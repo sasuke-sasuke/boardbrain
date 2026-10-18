@@ -135,6 +135,28 @@ function currentPlan() { return current.events.filter(e=>e.kind==='plan').at(-1)
 function completed(test, planEvent) {
   return current.events.some(e=>e.kind==='measurement'&&!e.retracted&&e.created>planEvent.created&&e.data.target===test.target&&e.data.quantity===test.quantity&&e.data.power_state===test.power_state&&e.data.reference===test.reference&&test.reference&&e.data.power_state!=='unknown'&&!e.data.warnings?.length&&(test.quantity!=='diode'||(e.data.polarity===test.polarity&&test.polarity)));
 }
+function sourceChips(ids) {
+  return [...new Set(ids||[])].filter(id=>evidence[id]).map(id=>`<button class="source-chip" data-evidence="${esc(id)}">${esc(evidenceLabel(id))}</button>`).join('');
+}
+function claimPin(claim) {
+  return (claim.evidence_ids||[]).map(id=>evidence[id]).find(e=>e?.kind==='pin'&&e.data.ref===claim.ref&&String(e.data.pin)===String(claim.pin)&&e.data.net===claim.net);
+}
+function renderClaims(claims) {
+  const labels={pin_connection:'Pin connection',document_fact:'Document excerpt',visual_observation:'Image observation',inference:'Interpretation',general:'General principle',unknown:'Not established'};
+  return claims.length?`<section class="grounded-answer" aria-label="Answer and supporting sources">${claims.map(claim=>{
+    const pin=claim.kind==='pin_connection'?claimPin(claim):null;
+    const content=claim.kind==='pin_connection'?(pin?`<p class="claim-connection"><strong>${esc(pinLabel(pin.data))}</strong><span aria-hidden="true">→</span><strong class="claim-net">${esc(pin.data.net)}</strong></p><p class="claim-context">${pin.source_id?'Connection recorded in the boardview.':'Mapping recorded as checked by the technician.'}${pin.conflict?' Conflicting mappings need checking.':!pin.scope_confirmed?' File applicability to a physical board is unconfirmed.':''}</p>`:'<p>Pin connection not established by the attached sources.</p>'):`<p class="claim-text">${esc(claim.text)}</p>`;
+    return `<article class="answer-claim claim-${esc(claim.kind)}"><h3>${esc(labels[claim.kind]||'Answer')}</h3>${content}${claim.quote?`<blockquote class="claim-quote">${esc(claim.quote)}</blockquote>`:''}${claim.kind==='visual_observation'?'<p class="claim-context">Interpreted from an image; check the original evidence before using it.</p>':''}${sourceChips(claim.evidence_ids)}</article>`;
+  }).join('')}</section>`:'';
+}
+function renderPlanSources(plan, retrieved) {
+  const claims=plan.claims||[], ids=Object.keys(retrieved||{});
+  if(!ids.length) return '';
+  if(!claims.length) return current.kind==='reference'?`<div class="panel form-gap"><h3>Evidence retrieved</h3>${sourceChips(ids)}</div>`:'';
+  const used=[...new Set([...claims.flatMap(c=>c.evidence_ids||[]),...plan.tests.flatMap(t=>[t.pin_evidence_id,t.expected_evidence_id,...t.evidence_ids]),...plan.hypotheses.flatMap(h=>[...h.support,...h.contradictions])])].filter(id=>retrieved[id]);
+  const other=ids.filter(id=>!used.includes(id));
+  return `<div class="panel form-gap plan-sources"><h3>Sources used</h3>${used.length?sourceChips(used):'<p class="small muted">No imported source supports these statements.</p>'}${other.length?`<details class="source-details other-evidence"><summary>Other evidence retrieved (${other.length})</summary><p class="small muted">Retrieved during this answer, but not cited as support.</p>${sourceChips(other)}</details>`:''}</div>`;
+}
 function renderPlan() {
   const event=currentPlan(); evidence={...evidence,...(event?.data.evidence||{})};
   if(!event) {
@@ -145,12 +167,14 @@ function renderPlan() {
   $('#plan').innerHTML=(stale?'<div class="warning">This plan predates a case update. Completed readings are shown below; ask for an update before following an old next step.</div>':'')+plan.tests.map((t,i)=>{
     const done=completed(t,event);
     return `<article class="next-test"><div class="test-heading"><span class="step-number">${done?'✓':String(i+1).padStart(2,'0')}</span><h2>${esc(t.title)}</h2></div><div class="test-facts"><span>${esc(t.quantity)}</span>${t.target?`<span>${esc(evidence[t.pin_evidence_id]?.kind==='pin'?pinLabel(evidence[t.pin_evidence_id].data):t.target)}</span>${evidence[t.pin_evidence_id]?.data.net?`<span class="mono">${esc(evidence[t.pin_evidence_id].data.net)}</span>`:''}`:''}<span>${esc(powerLabel(t.power_state))}</span></div><p class="procedure">${esc(t.procedure)}</p>${t.reference?`<p class="small">Reference: ${esc(t.reference)}${t.polarity?` · ${esc(t.polarity)}`:''}</p>`:''}<details class="test-details"><summary>Why this test & what it tells us</summary><p>${esc(t.why)}</p><p>${esc(t.interpretation)}</p><p>${t.expected_quote?`Source excerpt: “${esc(t.expected_quote)}”`:'No verified numeric expected value is attached to this test.'}</p>${t.stop_if?`<p>Stop if: ${esc(t.stop_if)}</p>`:''}${[t.pin_evidence_id,t.expected_evidence_id,...t.evidence_ids].filter((x,i,a)=>x&&a.indexOf(x)===i).map(x=>`<button class="source-chip" data-evidence="${esc(x)}">${esc(evidenceLabel(x))}</button>`).join('')}</details>${t.quantity!=='observation'?`<button class="${done?'quiet':'secondary'}" data-test="${i}" ${stale&&!done?'disabled':''}>${done?'Reading recorded':'Record this reading'}</button>`:''}</article>`;
-  }).join('')+`<div class="summary">${esc(plan.summary)}</div>${current.kind==='reference'&&Object.keys(event.data.evidence||{}).length?`<div class="panel form-gap"><h3>Evidence retrieved</h3>${Object.keys(event.data.evidence).slice(0,25).map(id=>`<button class="source-chip" data-evidence="${esc(id)}">${esc(evidenceLabel(id))}</button>`).join('')}</div>`:''}${event.data.model?`<p class="microcopy">${esc(modelLabel(event.data.model))} · ${event.data.analysis_mode==='deep'?'Deeper':'Standard'} analysis · Estimated $${Number(event.data.estimated_cost||0).toFixed(3)} · ${Number(event.data.elapsed_seconds||0).toFixed(1)} s</p>`:''}`+(plan.questions.length?`<div class="questions"><h3>To narrow this down</h3>${plan.questions.map(q=>`<p>${esc(q)}</p>`).join('')}</div>`:'');
+  }).join('')+renderClaims(plan.claims||[])+`${current.kind==='reference'&&plan.claims?.length?'':`<div class="summary">${esc(plan.summary)}</div>`}${renderPlanSources(plan,event.data.evidence)}${event.data.model?`<p class="microcopy">${esc(modelLabel(event.data.model))} · ${event.data.analysis_mode==='deep'?'Deeper':'Standard'} analysis · Estimated $${Number(event.data.estimated_cost||0).toFixed(3)} · ${Number(event.data.elapsed_seconds||0).toFixed(1)} s</p>`:''}`+(plan.questions.length?`<div class="questions"><h3>To narrow this down</h3>${plan.questions.map(q=>`<p>${esc(q)}</p>`).join('')}</div>`:'');
   $('#hypotheses').innerHTML=(plan.hypotheses.length?`<div class="hypotheses"><div class="section-label">WORKING HYPOTHESES</div>${plan.hypotheses.map(h=>`<div class="hypothesis">${esc(h.idea)}<br><span>Support: ${h.support.length} sources · Contradictions: ${h.contradictions.length}</span>${[...h.support,...h.contradictions].filter((x,i,a)=>a.indexOf(x)===i).map(x=>`<button class="source-chip" data-evidence="${esc(x)}">${esc(evidenceLabel(x))}</button>`).join('')}</div>`).join('')}</div>`:'')+(plan.web_sources.length?`<div class="panel"><h3>Research references · verify applicability</h3>${plan.web_sources.map(s=>`<p class="small"><a href="${esc(s.url)}" target="_blank" rel="noreferrer noopener">${esc(s.title||s.url)} ↗</a></p>`).join('')}</div>`:'');
 }
 function pinLabel(d) { return `${d.ref}.${d.name||d.pin}`; }
 function documentLabel(d) { return `PDF page ${d.page}${d.sheet?` · schematic sheet ${d.sheet}`:''}${d.page_title?` · ${d.page_title}`:''}`; }
-function evidenceLabel(id) { const e=evidence[id];return e?.kind==='document'?documentLabel(e.data):e?.kind==='pin'?pinLabel(e.data):e?.kind==='measurement'?e.data.target:e?.name||id; }
+function imageIsSection(d) { return Array.isArray(d.region)&&d.region.length===4&&d.region.some((n,i)=>n!==[0,0,1,1][i]); }
+function inspectionLabel(d) { return `PDF page ${d.page} · ${imageIsSection(d)?'enlarged section':'image'}${d.sheet?` · schematic sheet ${d.sheet}`:''}`; }
+function evidenceLabel(id) { const e=evidence[id];return e?.kind==='document'?documentLabel(e.data):e?.kind==='document_image'?inspectionLabel(e.data):e?.kind==='pin'?pinLabel(e.data):e?.kind==='measurement'?e.data.target:e?.name||'Source unavailable'; }
 function readingLabel(d) { return `${d.value} ${d.unit}`.trim(); }
 function renderReadings() {
   const readings=current.events.filter(e=>e.kind==='measurement'&&!e.retracted).slice(-6).reverse();
@@ -284,8 +308,42 @@ async function showPDF(id,page=1) {
   modalCleanup=()=>{active=false;sequence++;clearTimeout(timer);controller?.abort();if(url)URL.revokeObjectURL(url);window.removeEventListener('resize',resize);};
   await loadPage(Number(page));
 }
+async function showInspection(e) {
+  const cid=caseId(), d=e.data;
+  const section=imageIsSection(d), bounds=section?d.region.map(n=>Math.round(n*100)):null;
+  modal(e.name||'Inspected schematic image',`<p class="inspection-label">${esc(inspectionLabel(d))}${d.page_title?` · ${esc(d.page_title)}`:''}</p><div class="inspection-context"><p>Image sent to the assistant; interpretation still needs checking.</p><p class="small muted">${section?`Section of the full drawing: ${bounds[0]}–${bounds[2]}% across, ${bounds[1]}–${bounds[3]}% down.`:'Full schematic page.'}${d.focus?` Focus: ${esc(d.focus)}.`:''}</p></div><div class="pdf-toolbar"><div class="inline"><button id="inspection-fit" class="quiet" type="button">Fit width</button><button id="inspection-pixels" class="quiet" type="button">Actual pixels</button><button id="inspection-retry" class="quiet" type="button" hidden>Retry image</button></div><button id="inspection-full-page" class="secondary" type="button">Open full page</button></div><p id="inspection-status" class="modal-copy" role="status" aria-live="polite">Loading inspected image…</p><div id="inspection-viewport" tabindex="0" aria-label="Image inspected by the assistant; scroll to pan"><img id="inspection-image" alt="" hidden></div>`,null,'pdf-dialog inspection-dialog');
+  const viewport=$('#inspection-viewport'),img=$('#inspection-image'),status=$('#inspection-status'),retry=$('#inspection-retry');
+  let active=true,controller=null,url=null,sequence=0,actualPixels=false;
+  function sizeImage() { img.style.width=actualPixels?`${img.naturalWidth}px`:'100%'; }
+  async function loadImage() {
+    controller?.abort();controller=new AbortController();const ticket=++sequence;
+    retry.hidden=true;$('#modal-error').hidden=true;status.textContent='Loading inspected image…';viewport.setAttribute('aria-busy','true');
+    let candidate=null;
+    try {
+      const blob=await binary(`/api/inspection?case_id=${encodeURIComponent(cid)}&id=${encodeURIComponent(e.id)}`,controller.signal);
+      if(!active||ticket!==sequence) return;
+      candidate=URL.createObjectURL(blob);const ready=new Image();ready.src=candidate;await ready.decode();
+      if(!active||ticket!==sequence){URL.revokeObjectURL(candidate);return;}
+      if(url)URL.revokeObjectURL(url);url=candidate;candidate=null;
+      img.src=url;img.alt=`${section?'Enlarged section of':'Full'} schematic PDF page ${d.page} inspected by the assistant`;img.hidden=false;sizeImage();
+      status.textContent='Inspected image loaded. Open the full page to see its surrounding circuit.';
+    } catch(error) {
+      if(candidate)URL.revokeObjectURL(candidate);
+      if(!active||ticket!==sequence||error.name==='AbortError')return;
+      status.textContent='Inspected image could not load.';retry.hidden=false;
+      $('#modal-error').textContent=error.message;$('#modal-error').hidden=false;
+    } finally {if(active&&ticket===sequence)viewport.setAttribute('aria-busy','false');}
+  }
+  $('#inspection-fit').onclick=()=>{actualPixels=false;sizeImage();viewport.scrollTo(0,0);};
+  $('#inspection-pixels').onclick=()=>{actualPixels=true;sizeImage();};
+  $('#inspection-full-page').onclick=()=>showPDF(e.source_id,d.page).catch(error=>{notice(error.message);});
+  retry.onclick=loadImage;
+  modalCleanup=()=>{active=false;sequence++;controller?.abort();if(url)URL.revokeObjectURL(url);};
+  await loadImage();
+}
 async function showEvidence(id) {
   const e=evidence[id];if(!e) throw Error('Evidence is no longer in the current view. Search it again.');
+  if(e.kind==='document_image'&&e.source_id) return showInspection(e);
   if(e.kind==='document'&&e.source_id) return showPDF(e.source_id,e.data.page);
   if(e.kind==='photo') return showPhoto(e.id);
   if(e.kind==='pin') {

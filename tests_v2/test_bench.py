@@ -52,7 +52,7 @@ def reading(**changes):
 
 
 def plan():
-    return {"summary": "Check the input path using the recorded point.", "hypotheses": [], "questions": [], "web_sources": [],
+    return {"summary": "Check the input path using the recorded point.", "claims": [], "hypotheses": [], "questions": [], "web_sources": [],
             "tests": [{"title": "Recheck this point", "why": "Compare with the prior reading under the same conditions.",
                        "procedure": "Use the same checked point and reference.", "quantity": "voltage", "target": "U1.1",
                        "reference": "board ground", "power_state": "standby", "polarity": "", "pin_evidence_id": "P1",
