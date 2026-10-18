@@ -7,9 +7,11 @@ choose the next test, and retain confirmed repair outcomes.
 validation. It is not yet proven faster or more accurate on shop repairs. No live
 AI diagnosis or native-window acceptance test is implied by the automated tests.
 
-**First milestone: one boardview and its matching schematic, for one exact board
-and revision.** Verify the import against FlexBV 5.1244 and replay a repair with a
-known outcome before expanding to other boards or file formats.
+**First milestone: one boardview and its matching schematic.** These can be
+reference files; a repair symptom or outcome is not required to build and validate
+the import. Verify exact board/revision applicability and compare with FlexBV
+5.1244 before using mappings on a physical repair. Diagnostic outcome evaluation
+comes later, when a real repair is available.
 
 ## Start on a Mac
 
@@ -49,10 +51,18 @@ Native PDF text and the visual page viewer work without it.
 6. Confirm a repair only after recording the fix and post-repair verification.
    Keep suspected causes separate from verified causes.
 
-Plain `BVRAW_FORMAT_3` and CSV with `ref,pin,net` columns have strict connectivity
-adapters. Optional CSV columns: `side` (`T`, `B`, `O`), `x`, `y`. This is an explicit
+Plain `BVRAW_FORMAT_3` (including the observed `50.50.` prefix) and CSV with
+`ref,pin,net` columns have strict connectivity adapters. Malformed component
+records are excluded and listed in import details; a partial import is never a
+complete netlist. Global structural errors still reject the whole import.
+Optional CSV columns: `side` (`T`, `B`, `O`), `x`, `y`. This is an explicit
 interchange format, not a claim about a FlexBV export feature. Other boardview
 variants remain stored and available to FlexBV until their parsers are validated.
+
+Exact lookup preserves boardview pin numbers and separate pin labels, including
+ball labels such as `A1`. It also returns matching schematic pages when a net has
+many pins. Supported native contents tables supply separate PDF page and schematic
+sheet labels; the original PDF remains the source for interpreting the drawing.
 
 The new runtime uses a separate data directory/database. It leaves the old data
 and legacy app intact. See [the rebuild notes](docs/BENCH_REBUILD.md) for evidence

@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import sqlite3
 import uuid
@@ -278,35 +279,83 @@ class Store:
 
     def lookup(self, case_id: str, query: str, limit=25) -> list[dict]:
         query = require_text(query, "Search", 200)
+        limit = max(1, min(int(limit), 100))
         case = self.case(case_id)
-        escaped = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        select = "SELECT e.*,s.name,s.scope_confirmed,s.status FROM evidence e JOIN sources s ON e.source_id=s.id WHERE e.case_id=?"
+        pin_clause = " AND e.kind='pin' AND (e.net=? OR e.ref=? OR e.ref||'.'||e.pin=? OR e.ref||'.'||json_extract(e.data,'$.name')=?)"
+        params = (case_id, query, query, query, query)
         with self.connect() as db:
-            rows = db.execute("""SELECT e.*,s.name,s.scope_confirmed,s.status FROM evidence e
-                JOIN sources s ON e.source_id=s.id WHERE e.case_id=? AND
-                (e.net=? OR e.ref=? OR e.ref||'.'||e.pin=? OR e.body LIKE ? ESCAPE '\\')
-                ORDER BY CASE WHEN e.kind='pin' THEN 0 ELSE 1 END,e.id LIMIT ?""", (case_id, query, query, query, "%" + escaped + "%", limit)).fetchall()
-        found = []
-        for row in rows:
+            pin_total = db.execute("SELECT COUNT(*) FROM evidence e WHERE e.case_id=?" + pin_clause, params).fetchone()[0]
+            pin_rows = db.execute(select + pin_clause + " ORDER BY e.ref,e.pin,e.id LIMIT 100", params).fetchall()
+            # A schematic normally labels the component separately from the pad.
+            # Return its page as a reference, never claim text proximity proves wiring.
+            doc_query = query
+            refs = {r["ref"] for r in pin_rows}
+            if len(refs) == 1 and query.startswith(next(iter(refs)) + "."):
+                doc_query = next(iter(refs))
+            escaped = doc_query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            direct = re.fullmatch(r"(?i)(?:schematic\s+)?(sheet|(?:pdf\s+)?page)\s+(\d+)", query)
+            if direct:
+                key = "sheet" if direct[1].lower() == "sheet" else "page"
+                doc_rows = db.execute(select + f" AND e.kind='document' AND CAST(json_extract(e.data,'$.{key}') AS TEXT)=?", (case_id, str(int(direct[2])))).fetchall()
+            else:
+                doc_rows = db.execute(select + " AND e.kind='document' AND (e.body LIKE ? ESCAPE '\\' OR json_extract(e.data,'$.page_title') LIKE ? ESCAPE '\\')",
+                                      (case_id, "%" + escaped + "%", "%" + escaped + "%")).fetchall()
+        # Electrical punctuation belongs to the identifier, not to a word boundary.
+        pattern = re.compile(r"(?<![\w+#./-])" + re.escape(doc_query) + r"(?![\w+#./-])", re.IGNORECASE)
+        def unpack(row):
             item = dict(row)
             item["data"] = json.loads(item.pop("data"))
             item.pop("body", None)
             item["data"].pop("blocks", None)  # Page coordinates stay in the stored document; keep lookup bounded.
+            return item
+        pins = [unpack(r) for r in pin_rows]
+        docs = []
+        for row in doc_rows:
+            item = unpack(row)
+            full = item["data"].get("text", "")
+            match = pattern.search(full)
+            if not direct and not match and not pattern.search(item["data"].get("page_title", "")):
+                continue
             if "text" in item["data"]:
-                full = item["data"]["text"]
-                start = max(0, full.casefold().find(query.casefold()) - 250)
+                start = max(0, (match.start() if match else 0) - 250)
                 item["data"]["text"] = full[start:start + 1800]
-            found.append(item)
+                item["data"]["excerpted"] = start > 0 or len(full) > 1800
+            item["matched_reference"] = doc_query
+            docs.append(item)
+        docs.sort(key=lambda e: (e["data"].get("page", 0), e["id"]))
+        observations, problems = [], []
         for e in case["events"]:
             if not e["retracted"] and e["kind"] == "pin" and query in (e["data"]["net"], e["data"]["ref"], e["data"]["ref"] + "." + e["data"]["pin"]):
-                found.append(e | {"scope_confirmed": 1, "name": "Technician checked mapping"})
+                observations.append(e | {"scope_confirmed": 1, "name": "Technician checked mapping"})
             elif not e["retracted"] and e["kind"] in ("measurement", "note") and query.casefold() in dumps(e["data"]).casefold():
-                found.append(e)
+                observations.append(e)
+        for source in case["sources"]:
+            for problem in source["info"].get("issues", []):
+                if query == problem["ref"] or query.startswith(problem["ref"] + "."):
+                    problems.append({"id": source["id"] + ":excluded:" + problem["ref"], "kind": "import_issue", "source_id": source["id"],
+                                     "name": "Excluded component " + problem["ref"], "data": problem | {"text": "No imported mapping accepted for this component. " + problem["reason"]}})
+        # Reserve space for schematic pages, even when a rail has hundreds of pins.
+        # Fill unused space from the remaining results; disclose any truncation.
+        doc_slots = min(len(docs), max(1, limit // 3))
+        obs_slots = min(len(observations), max(1, limit // 4))
+        chosen = problems + docs[:doc_slots] + observations[:obs_slots]
+        chosen += pins[:max(0, limit - len(chosen))]
+        chosen += docs[doc_slots:] + observations[obs_slots:]
+        found = chosen[:limit]
+        alias_keys = {(p["data"]["ref"], p["data"]["pin"]) for p in pins
+                      if query in (p["data"]["ref"] + "." + p["data"]["pin"], p["data"]["ref"] + "." + p["data"].get("name", ""))}
+        coverage = {"imported_pin_matches": pin_total, "document_matches": len(docs),
+                    "imported_pins_returned": sum(e in pins for e in found), "documents_returned": sum(e in docs for e in found)}
+        coverage["truncated"] = pin_total > coverage["imported_pins_returned"] or len(docs) > coverage["documents_returned"] or len(observations) > sum(e in observations for e in found)
         # Conflicts remain visible to humans and make all competing mappings ineligible.
         for item in found:
+            item["lookup_coverage"] = coverage
             if item["kind"] == "pin":
                 d = item["data"]
-                item["conflict"] = len(self.pin_nets(case_id, d["ref"], d["pin"])) > 1
-        return found[:limit]
+                item["alias_ambiguous"] = len(alias_keys) > 1
+                item["conflict"] = item["alias_ambiguous"] or len(self.pin_nets(case_id, d["ref"], d["pin"])) > 1
+        return found
 
     def pin_nets(self, case_id: str, ref: str, pin: str) -> set[str]:
         with self.connect() as db:

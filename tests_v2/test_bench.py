@@ -17,6 +17,7 @@ from boardbrain_v2.assistant import Assistant, ProviderError, validate_plan
 from boardbrain_v2.ingest import import_source, prepare_photo
 from boardbrain_v2.measurements import parse_reading, validate_measurement, fulfills
 from boardbrain_v2.parsers import parse_boardview, parse_bvr3
+from boardbrain_v2.pdf_index import sheet_index
 from boardbrain_v2.server import App, make_server
 from boardbrain_v2.store import Store
 
@@ -103,6 +104,36 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(result["status"], "parsed")
         result = parse_boardview("mapping.csv", b"ref,pin,net,x,y\nU1,1,USB_D+,nan,2\n")
         self.assertEqual(result["status"], "invalid")
+
+    def test_observed_prefixed_header_preserves_numbers_and_labels(self):
+        data=BVR.replace("BVRAW_FORMAT_3","50.50.BVRAW_FORMAT_3").replace("PIN_NAME DP","PIN_NAME A1")
+        result=parse_boardview("sample.BVR",data.encode())
+        self.assertEqual(result["status"],"parsed")
+        self.assertEqual((result["pins"][0]["pin"],result["pins"][0]["name"]),("1","A1"))
+        self.assertEqual(result["pins"][0]["line"],BVR.splitlines().index("PIN_END")+1)
+        self.assertEqual(parse_boardview("sample.bvr",("junk."+BVR).encode())["status"],"unsupported")
+
+    def test_malformed_components_are_excluded_without_inherited_pins(self):
+        first=BVR
+        missing_end=BVR.replace("BVRAW_FORMAT_3\n","").replace("U1","U2").replace("PART_END","")
+        bad_note=BVR.replace("BVRAW_FORMAT_3\n","").replace("U1","U3").replace("PIN_NAME DP","PIN_NAME DP\nOTHER_NET")
+        last=BVR.replace("BVRAW_FORMAT_3\n","").replace("U1","U4")
+        result=parse_boardview("sample.bvr",(first+missing_end+bad_note+last).encode())
+        self.assertEqual(result["status"],"partial")
+        self.assertFalse(result["connectivity_complete"])
+        self.assertEqual({p["ref"] for p in result["pins"]},{"U1","U4"})
+        self.assertEqual(len(result["pins"]),8)
+        self.assertEqual({p["ref"] for p in result["issues"]},{"U2","U3"})
+        self.assertEqual(result["part_count"],4)
+
+    def test_global_errors_fail_whole_file_and_duplicate_refs_exclude_all(self):
+        result=parse_boardview("sample.bvr",(BVR+"UNKNOWN_GLOBAL_MODE reversed\n").encode())
+        self.assertEqual(result["status"],"invalid");self.assertEqual(result["pins"],[])
+        duplicate=BVR.replace("BVRAW_FORMAT_3\n","")
+        result=parse_boardview("sample.bvr",(BVR+duplicate+duplicate.replace("U1","U2")).encode())
+        self.assertEqual(result["status"],"partial")
+        self.assertEqual({p["ref"] for p in result["pins"]},{"U2"})
+        self.assertEqual(result["excluded_part_count"],2)
 
 
 class MeasurementTests(unittest.TestCase):
@@ -197,6 +228,77 @@ class StoreTests(unittest.TestCase):
             self.store.capture(self.a, "note", {"text": "New evidence"})
         self.store.close_case(self.a, {"status": "open"})
         self.assertEqual(self.store.confirmed_cases(self.b, "No power"), [])
+
+    def test_schematic_pages_survive_large_rail_and_exact_identifier_filter(self):
+        csv="ref,pin,net\n"+"".join(f"C{i},1,RAIL+\n" for i in range(60))
+        source=self.store.add_source(self.a,"large.csv",csv.encode(),"boardview",True)
+        import_source(self.store,self.a,source["id"],threading.Event(),lambda _:None)
+        pdf=self.store.add_source(self.a,"reference.pdf",b"synthetic placeholder","schematic",True)
+        self.store.source_result(self.a,pdf["id"],"ready",{},[
+            {"kind":"document","page":1,"text":"RAIL+ is documented here.","method":"native_text"},
+            {"kind":"document","page":2,"text":"RAIL+_ALT is a different identifier.","method":"native_text"},
+            {"kind":"document","page":3,"text":"RAIL- is also different.","method":"native_text"}])
+        found=self.store.lookup(self.a,"RAIL+",15)
+        self.assertEqual(found[0]["kind"],"document")
+        self.assertEqual([e["data"]["page"] for e in found if e["kind"]=="document"],[1])
+        self.assertEqual(len(found),15)
+        self.assertEqual(found[0]["lookup_coverage"]["imported_pin_matches"],60)
+        self.assertTrue(found[0]["lookup_coverage"]["truncated"])
+
+    def test_pin_label_lookup_keeps_number_and_returns_component_schematic(self):
+        bvr=BVR.replace("PIN_NAME DP","PIN_NAME A1")
+        source=self.store.add_source(self.a,"labels.bvr",bvr.encode(),"boardview",True)
+        import_source(self.store,self.a,source["id"],threading.Event(),lambda _:None)
+        pdf=self.store.add_source(self.a,"reference.pdf",b"synthetic placeholder","schematic",True)
+        self.store.source_result(self.a,pdf["id"],"ready",{},[
+            {"kind":"document","page":2,"sheet":"17","text":"U1 component diagram reference.","method":"native_text"}])
+        found=self.store.lookup(self.a,"U1.A1")
+        pins=[e for e in found if e["kind"]=="pin"]
+        self.assertEqual((pins[0]["data"]["pin"],pins[0]["data"]["name"]),("1","A1"))
+        self.assertFalse(pins[0]["conflict"])
+        self.assertEqual(found[0]["data"]["page"],2)
+        self.assertEqual(found[0]["matched_reference"],"U1")
+        self.assertEqual(self.store.lookup(self.a,"sheet 17")[0]["data"]["page"],2)
+
+    def test_ambiguous_pin_label_and_number_cannot_be_promoted_to_fact(self):
+        bvr=BVR.replace("PIN_NAME DP","PIN_NAME A1").replace("PIN_NUMBER 2","PIN_NUMBER A1")
+        source=self.store.add_source(self.a,"ambiguous.bvr",bvr.encode(),"boardview",True)
+        import_source(self.store,self.a,source["id"],threading.Event(),lambda _:None)
+        found=self.store.lookup(self.a,"U1.A1")
+        self.assertEqual(len(found),2)
+        self.assertTrue(all(e["alias_ambiguous"] and e["conflict"] for e in found))
+
+    def test_partial_import_exposes_reason_without_bad_component_mapping(self):
+        bad=BVR.replace("BVRAW_FORMAT_3\n","").replace("U1","U2").replace("PIN_NAME DP","UNLABELLED_NOTE")
+        source=self.store.add_source(self.a,"partial.bvr",(BVR+bad).encode(),"boardview",True)
+        import_source(self.store,self.a,source["id"],threading.Event(),lambda _:None)
+        self.assertEqual(self.store.source(self.a,source["id"])["status"],"partial")
+        found=self.store.lookup(self.a,"U2.1")
+        self.assertEqual([e["kind"] for e in found],["import_issue"])
+        self.assertIn("No imported mapping",found[0]["data"]["text"])
+        self.assertEqual(len(self.store.lookup(self.a,"U1.1")),1)
+
+    def test_pdf_contents_index_uses_coordinates_and_keeps_page_and_sheet_separate(self):
+        import fitz
+        doc=fitz.open()
+        for _ in range(3):doc.new_page()
+        page=doc[0]
+        # Deliberately insert text out of reading order, including a blank title.
+        for x,y,text in [(130,110,"Power input"),(80,110,"52"),(40,110,"3"),
+                         (40,50,"PAGE"),(80,50,"CSA"),(130,50,"CONTENTS"),(240,50,"SYNC"),
+                         (40,90,"2"),(80,90,"17"),(40,70,"1"),(80,70,"1"),(130,70,"Contents")]:
+            page.insert_text((x,y),text,fontsize=10)
+        doc[1].insert_text((40,50),"Native second page text")
+        doc[2].insert_text((40,50),"Native third page text")
+        labels=sheet_index(doc)
+        self.assertEqual(labels[3],{"sheet":"52","page_title":"Power input","toc_page":1})
+        self.assertEqual(labels[2]["page_title"],"")
+        source=self.store.add_source(self.a,"indexed.pdf",doc.tobytes(),"schematic",True)
+        import_source(self.store,self.a,source["id"],threading.Event(),lambda _:None)
+        result=self.store.lookup(self.a,"sheet 52")
+        self.assertEqual(result[0]["data"]["page"],3)
+        self.assertEqual(result[0]["data"]["sheet"],"52")
+        self.assertEqual(self.store.lookup(self.a,"PDF page 2")[0]["data"]["sheet"],"17")
 
     def test_retraction_preserves_history_and_excludes_evidence(self):
         e = self.store.capture(self.a, "measurement", reading())

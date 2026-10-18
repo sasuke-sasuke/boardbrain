@@ -6,6 +6,7 @@ from pathlib import Path
 import threading
 
 from .parsers import parse_boardview
+from .pdf_index import sheet_index
 from .store import Store
 
 
@@ -77,6 +78,7 @@ def import_pdf(store, source, path, cancel, progress, ocr_pages):
             raise ValueError("PDF exceeds 1500 pages; split it into sections.")
         if len(ocr_pages) > 10 or any(type(p) is not int or p < 1 or p > len(doc) for p in ocr_pages):
             raise ValueError("Choose up to 10 valid page numbers for OCR.")
+        index_labels = sheet_index(doc)
         for index, page in enumerate(doc):
             if cancel.is_set():
                 raise InterruptedError()
@@ -96,9 +98,10 @@ def import_pdf(store, source, path, cancel, progress, ocr_pages):
                     missing.append(index + 1)
             if text.strip():
                 blocks = [{"bbox": list(b[:4]), "text": b[4][:2000]} for b in page.get_text("blocks") if len(b) > 4 and isinstance(b[4], str)]
-                evidence.append({"kind": "document", "page": index + 1, "text": text[:50000], "text_truncated": len(text) > 50000,
+                evidence.append({"kind": "document", "page": index + 1, **index_labels.get(index + 1, {}), "text": text[:50000], "text_truncated": len(text) > 50000,
                                  "method": method, "blocks": blocks[:200], "use": "Reference text only. Does not prove circuit connectivity or a particular pin mapping."})
-        info = {"parser_version": "pdf-pages/1", "pages": len(doc), "image_only_pages": missing,
+        info = {"parser_version": "pdf-pages/2", "pages": len(doc), "image_only_pages": missing,
+                "sheet_index": {str(k): v for k, v in index_labels.items()},
                 "message": f"{len(evidence)} pages have searchable text." + (f" {len(missing)} pages need OCR or visual inspection." if missing else "")}
     if cancel.is_set():
         raise InterruptedError()

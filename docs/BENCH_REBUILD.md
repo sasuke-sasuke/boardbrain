@@ -9,7 +9,7 @@ the native Mac window must be tested before relying on it in production repairs.
 - One Mac at the bench; typed observations and selected photos first. Voice later.
 - FlexBV remains the board viewer; the initial configuration records version 5.1244.
 - Validate one matching boardview/schematic pair and exact revision before adding
-  other boards or parser variants. The technician supplies the first pair.
+  other boards or parser variants. Reference files do not require a repair outcome.
 - SQLite and original files stay local. Only explicitly requested AI work is paid.
 - Start with a $75/month app limit and a $50 warning threshold; both are editable.
 - Scope/logic-analyzer procedures require exact instrument/probe details and ground
@@ -30,15 +30,26 @@ before real-board validation. Native UI testing is still required.
 - Explicit measurement capture, SI prefix conversion, negative readings, OL,
   polarity/reference/power state, correction history, and condition-aware completion.
 - Exact original net identities: `USB_D+`, `USB_D-`, `RESET#`, `RESET` stay distinct.
-- Strict plain `BVRAW_FORMAT_3` records and documented CSV interchange. Component,
-  pin, net, side and coordinates are preserved; relative origins are handled. A
-  malformed record invalidates the whole connectivity result. Unknown structural
-  fields or binary formats do not fall back to string adjacency.
+- Strict plain `BVRAW_FORMAT_3` records (including the observed `50.50.` prefix)
+  and documented CSV interchange. Component, pin number, separate label, net,
+  side and coordinates are preserved; relative origins are handled. A malformed
+  component is quarantined as a whole at explicit component boundaries, with its
+  source lines and reason visible. Every occurrence of a duplicate component is
+  quarantined. Unknown global structure rejects the entire import. A partial import
+  is explicitly incomplete. No unknown record becomes guessed connectivity.
 - Per-file scope checks, visible conflicts, technician-checked individual mappings,
   hashed originals, duplicate suppression and background imports. No ingest-on-launch.
 - PDF native page text and source-page viewing; explicit, cached OCR for selected
   scanned pages when Tesseract is present. Neither OCR nor text proximity creates
   pin connectivity. PDF drawings are not automatically electrically reconstructed.
+- Coordinate-based reading of explicit native PAGE/CSA/CONTENTS tables keeps PDF
+  page position separate from schematic sheet labels. Blank table titles remain
+  blank; ambiguous rows are discarded. Other table layouts receive no guessed labels.
+- Mixed lookup reserves space for schematic evidence when a rail has many pins,
+  exposes result truncation, respects identifier punctuation in document matching,
+  supports exact pin-label lookup, and rejects ambiguous number/label collisions.
+  Looking up a pin can also return its component's schematic page; that is a
+  document reference, not an inferred wire or pin connection.
 - JPEG/PNG/HEIC photo normalization; selected photos sent at up to 2048 px, with
   orientation corrected and EXIF removed. The original remains local.
 - A bounded Responses API tool loop with local evidence lookup, confirmed repair
@@ -96,7 +107,7 @@ applies to a circuit. Identity gates and scoped evidence reduce specific classes
 of mistakes; free-text suggestions can still be wrong. The native Mac UI, live AI
 calls and real proprietary boardviews need actual trials.
 
-Only literal plain BVR3 and the interchange CSV are implemented as connectivity
+Only plain BVR3 with the two recognized headers and the interchange CSV are implemented as connectivity
 adapters in this preview. `.brd`, `.tvw`, encrypted/binary `.bvr`, `.pcb`/XZZ and
 other formats are retained for FlexBV, with an explicit unsupported status.
 There is no assumed FlexBV export command or undocumented IPC/API integration.
@@ -114,9 +125,10 @@ possible unsafe or incorrect instruction.
 
 ## Real-board acceptance gate
 
-1. Supply **one boardview and its matching schematic PDF for one exact board and
-   revision**. Prefer a familiar repair with a known outcome. Record file hashes,
-   board identifiers and revision; resolve mismatches before trusting connectivity.
+1. Supply **one boardview and its matching schematic PDF** as reference data. No
+   repair or outcome is required for this stage. Record file hashes and known board
+   identifiers. Leave an unknown revision unknown; physical-board applicability
+   and FlexBV comparisons remain a separate check before probing.
 2. Validate that file's adapter against FlexBV 5.1244: total parts/pins/nets,
    exact pin numbers and net spelling, side, coordinate transforms, disconnected
    pins and any duplicate/subboard behavior. Compare all records where a trusted
@@ -127,12 +139,15 @@ possible unsafe or incorrect instruction.
    schematic passages, missing evidence, contradictory readings, and next-test
    decisions. Preserve the correct answers privately. Exact lookup/reference
    questions must have zero unresolved mismatches before diagnostic evaluation.
-4. Replay the known repair with the outcome hidden. Give Sol and Astra identical
+4. Compare Sol and Astra on the checked reference questions using identical evidence.
+   When a real or previously resolved repair becomes available, replay it with the
+   outcome hidden. Give Sol and Astra identical
    evidence snapshots, without either seeing the other's answer. Record factual
    errors, unnecessary/repeated tests, useful next steps, response time, cost and
    technician corrections. Log the model/settings and repeat ambiguous results.
    Track bench minutes against the technician's baseline. A single board/case
    establishes a narrow pilot, not general diagnostic accuracy or guaranteed speed.
+   Do not manufacture an outcome for a reference-only document pair.
 5. Verify launch/relaunch, Keychain, photos, PDF viewing, cancel/retry, backup/restore
    and offline case access on the actual Mac. Complete one supervised repair
    workflow from intake through measured post-repair verification.
@@ -142,8 +157,34 @@ possible unsafe or incorrect instruction.
 
 Private boardviews, schematics and repair histories stay outside this public
 repository. Only legally shareable synthetic/minimal regression fixtures belong
-in the codebase. Current gate status: awaiting the first matching pair; no real
-board or live model acceptance results have been recorded.
+in the codebase. Current gate status: the first reference-only pair has been
+inspected and imported locally. Full FlexBV/physical-board checks, a real repair,
+and live model acceptance remain outstanding.
+
+## First supplied reference pair: local checks
+
+The supplied A2338 / 820-02020 pair is reference data, not a repair case. The files
+remain unchanged and are not included in this repository. Board revision has not
+been established. The schematic contains the supplied board identifier in its BOM;
+this does not establish applicability to every physical board revision.
+
+- The BVR contains 4,318 component starts and 13,713 explicit pin records. Three
+  component records are malformed: two contain unlabelled records and one lacks
+  its closing component marker. The importer accepts 4,315 components / 13,710
+  pins and excludes all three affected records. It reports partial connectivity.
+- An independent direct-field scan compared every accepted pin's number, label,
+  net, side, coordinates and source line with the original. All 13,710 matched;
+  this checks extraction fidelity, not the correctness of the source boardview.
+- All 117 PDF pages contain native text. The explicit contents table supplies
+  all 117 PDF-page/schematic-sheet mappings, including two blank titles. The index
+  and selected circuit pages were visually inspected. No OCR was needed for text
+  indexing; extracted text still does not reproduce electrical drawing topology.
+- Local integration checks covered a large rail, a letter-number pin label,
+  direct sheet lookup and an excluded component. Schematic pages remained visible
+  alongside pin matches, and excluded components returned reasons without mappings.
+- In this development environment the two-file import took about 2.7 seconds;
+  sampled local lookups took 48–81 ms. These are observations from this run, not
+  Mac benchmarks or AI response-time measurements. No paid model call was made.
 
 ## Data and recovery
 
@@ -164,11 +205,13 @@ backup database with unrelated old WAL/SHM files.
 
 ## Verification recorded for this draft
 
-- 38 local Python tests passed on 2026-10-18, including Astra routing with the same
+- 46 local Python tests passed on 2026-10-18, including Astra routing with the same
   case evidence, per-model cost settlement, budget rejection before any request,
   network uncertainty without fallback, and evidence rejection for both models.
   Python compilation and JavaScript syntax checks passed after the routing change;
-  shell syntax checks passed in the original rebuild.
+  shell syntax checks passed in the original rebuild. New tests cover prefixed
+  BVR3 recognition, component quarantine, global errors, duplicate identities,
+  pin labels/ambiguity, schematic result availability and PDF page/sheet indexing.
 - The local service was started in a fresh temporary data directory and its
   authenticated state endpoint responded successfully without an API key.
 - The browser workflow test is provided but could not execute here: Chromium's
@@ -176,7 +219,8 @@ backup database with unrelated old WAL/SHM files.
 - The first GitHub workflow run failed before any runner steps started; the Mac
   build was skipped. Job logs were unavailable through the connector. No tested
   `.app` artifact has been produced by that run.
-- Live model calls, Keychain behavior and actual shop boardviews are unverified.
+- Live model calls, Keychain behavior and FlexBV comparison are unverified. One
+  actual reference pair has passed the extraction checks described above.
 
 ## Primary references used
 
