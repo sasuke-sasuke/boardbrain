@@ -205,18 +205,26 @@ backup database with unrelated old WAL/SHM files.
 
 ## Verification recorded for this draft
 
-- 46 local Python tests passed on 2026-10-18, including Astra routing with the same
+- 52 local Python tests passed on 2026-10-18, including Astra routing with the same
   case evidence, per-model cost settlement, budget rejection before any request,
   network uncertainty without fallback, and evidence rejection for both models.
   Python compilation and JavaScript syntax checks passed after the routing change;
   shell syntax checks passed in the original rebuild. New tests cover prefixed
   BVR3 recognition, component quarantine, global errors, duplicate identities,
   pin labels/ambiguity, schematic result availability and PDF page/sheet indexing.
-- The local service was started in a fresh temporary data directory and its
-  authenticated state endpoint responded successfully without an API key.
+- The local HTTP workflow passed against a new process: startup/authentication,
+  reference creation, boardview/PDF/photo import, exact lookup, PDF/photo rendering,
+  and reuse in a new repair with fresh source IDs and cleared scope checks.
+  The same check is run against the built Mac executable by the setup script.
+- The exact setup import command passed with the supplied reference pair in a
+  temporary workspace: 13,710 pins, 117 PDF pages, three known exclusions, no
+  outcome, unchanged original hashes, and no duplicate files/workspace on rerun.
+- Database schema 2 migrates existing schema-1 cases to kind `repair`. New reference
+  workspaces cannot accept repair outcomes or physical measurement/pin records.
+  A regression test verifies existing data survives the migration.
 - The browser workflow test is provided but could not execute here: Chromium's
   download failed. Native window layout/interaction has not been visually verified.
-- The first GitHub workflow run failed before any runner steps started; the Mac
+- GitHub workflow runs, including a retry of the latest run, failed before any runner steps started; the Mac
   build was skipped. Job logs were unavailable through the connector. No tested
   `.app` artifact has been produced by that run.
 - Live model calls, Keychain behavior and FlexBV comparison are unverified. One

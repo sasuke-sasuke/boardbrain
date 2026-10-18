@@ -13,3 +13,5 @@ build/
 node_modules/
 test-results/
 playwright-report/
+reference-bundle/
+BoardBrain-Setup.log

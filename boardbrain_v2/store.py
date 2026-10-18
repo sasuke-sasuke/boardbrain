@@ -72,10 +72,12 @@ class Store:
         self.path = self.root / "boardbrain-v2.sqlite3"
         with self.connect() as db:
             version = db.execute("PRAGMA user_version").fetchone()[0]
-            if version > 1:
+            if version > 2:
                 raise RuntimeError("This data was created by a newer BoardBrain. Install that version before opening it.")
             db.executescript(SCHEMA)
-            db.execute("PRAGMA user_version=1")
+            if "kind" not in {r[1] for r in db.execute("PRAGMA table_info(cases)")}:
+                db.execute("ALTER TABLE cases ADD COLUMN kind TEXT NOT NULL DEFAULT 'repair'")
+            db.execute("PRAGMA user_version=2")
         self.path.chmod(0o600)
 
     @contextmanager
@@ -111,16 +113,36 @@ class Store:
                 db.execute("INSERT OR REPLACE INTO settings VALUES (?,?)", (key, dumps(value)))
         return proposed
 
-    def create_case(self, data: dict) -> dict:
+    def create_case(self, data: dict, *, identifier=None) -> dict:
+        kind = data.get("kind", "repair")
+        if kind not in ("repair", "reference"):
+            raise ValueError("Choose a repair or a reference workspace.")
         values = {k: str(data.get(k, "")).strip() for k in ("title", "device", "board_id", "revision", "symptom")}
+        if kind == "reference" and not values["symptom"]:
+            values["symptom"] = "Reference files only. No active repair or outcome."
         for field, cap in (("title", 120), ("symptom", 4000)):
             values[field] = require_text(values[field], field, cap)
         if any(len(values[k]) > 200 for k in ("device", "board_id", "revision")):
             raise ValueError("Device/board identifiers are too long.")
-        case_id, timestamp = uid("C"), now()
+        case_id, timestamp = identifier or uid("C"), now()
+        reference = None
+        if data.get("reference_id"):
+            reference = self.case(data["reference_id"])
+            if kind != "repair" or reference["kind"] != "reference":
+                raise ValueError("A repair can reuse files from a reference workspace.")
+            if any(s["status"] in ("queued", "processing") for s in reference["sources"]):
+                raise ValueError("Wait for the reference import to finish first.")
         with self.connect() as db:
-            db.execute("INSERT INTO cases(id,title,device,board_id,revision,symptom,created,updated) VALUES(?,?,?,?,?,?,?,?)",
-                       (case_id, *values.values(), timestamp, timestamp))
+            db.execute("INSERT INTO cases(id,title,device,board_id,revision,symptom,created,updated,kind) VALUES(?,?,?,?,?,?,?,?,?)",
+                       (case_id, *values.values(), timestamp, timestamp, kind))
+            if reference:
+                # Share immutable originals, but isolate every mapping/scope check.
+                for source in reference["sources"]:
+                    sid = uid("S")
+                    db.execute("INSERT INTO sources VALUES(?,?,?,?,?,?,?,?,?)", (sid, case_id, source["name"], source["sha"], source["role"], source["status"], dumps(source["info"]), 0, timestamp))
+                    for row in db.execute("SELECT kind,data,net,ref,pin,body FROM evidence WHERE source_id=?", (source["id"],)).fetchall():
+                        eid = "D" + hashlib.sha256((sid + row["data"]).encode()).hexdigest()[:20]
+                        db.execute("INSERT INTO evidence VALUES(?,?,?,?,?,?,?,?,?)", (eid, case_id, sid, *tuple(row)))
         return self.case(case_id)
 
     def list_cases(self, query="") -> list[dict]:
@@ -182,7 +204,10 @@ class Store:
         return dict(id=event_id, case_id=case_id, kind=kind, data=data, created=timestamp, retracted=0)
 
     def capture(self, case_id: str, kind: str, data: dict) -> dict:
-        if self.case(case_id)["status"] != "open":
+        case = self.case(case_id)
+        if case["kind"] == "reference" and kind != "note":
+            raise ValueError("Start a repair from these files before recording physical board measurements or pin checks.")
+        if case["status"] != "open":
             raise ValueError("Reopen this case before changing its evidence.")
         if kind == "measurement":
             data = validate_measurement(data)
@@ -209,6 +234,8 @@ class Store:
 
     def close_case(self, case_id: str, data: dict) -> dict:
         case = self.case(case_id)
+        if case["kind"] == "reference":
+            raise ValueError("Reference workspaces have no repair outcome. Start a repair when you have a board on the bench.")
         status = data.get("status")
         if status not in ("confirmed", "unresolved", "open"):
             raise ValueError("Choose confirmed, unresolved or reopen.")

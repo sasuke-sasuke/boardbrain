@@ -18,16 +18,33 @@ comes later, when a real repair is available.
 The intended everyday launch is **BoardBrain.app from Finder or the Dock**. Cases
 reopen from local storage; launch does not re-ingest documents or call the AI.
 
-Two build paths are provided:
+For the prepared setup download, unzip it and double-click
+**Setup-BoardBrain.command**. The one-time setup downloads dependencies, runs the
+checks, builds the Apple Silicon app, checks the packaged runtime, imports an
+included private reference bundle if present, and installs it in
+`~/Applications/BoardBrain.app`. It then opens the app and reveals it in Finder.
+Keep it in the Dock. No typed Terminal commands are needed.
 
-1. The **BoardBrain bench preview** GitHub Actions workflow builds an Apple Silicon
-   `.app` zip after the test job. Download its artifact when that run succeeds.
-   This is an ad-hoc-signed development preview, not a notarized installer; macOS
-   may require an explicit first-open approval through Privacy & Security.
-2. For a local source build, install Python 3.11+ from python.org once, then
-   double-click **Build-BoardBrain.command** in the downloaded project folder.
-   It creates an isolated build environment and reveals `dist/BoardBrain.app`.
-   Drag the app to Applications. Future launches require no Terminal commands.
+Setup uses an existing native Python 3.11–3.13 installation. If one is missing,
+it opens the official [Python 3.13 installer page](https://www.python.org/downloads/release/python-31316/).
+Install its macOS package, then double-click setup again. Network access is needed
+for the one-time dependency installation. If Apple Command Line Tools are missing,
+setup opens Apple's installer; finish that installation and rerun setup. The full
+Xcode application is not needed. The app runs independently of that
+build environment afterward. If setup stops, its `BoardBrain-Setup.log` records
+the failure; do not include an API key when sharing a log.
+
+This is a development preview, not a notarized installer. If macOS blocks the
+setup file on first open, use the per-file **Open Anyway** option in System
+Settings → Privacy & Security. Do not disable macOS security globally.
+An existing app at the installation destination is moved to a dated Previous
+copy; saved cases live separately. Quit an existing BoardBrain before setup.
+
+The **BoardBrain bench preview** GitHub Actions workflow also defines an Apple
+Silicon app build after verification. Current runs stop before test steps and
+produce no app artifact; the underlying runner failure remains unresolved.
+The local setup path is the available delivery path, not a claim of a tested Mac
+binary from this Linux development environment.
 
 Open **Settings & equipment** to enter the API key, budget and instrument models.
 The default app limit is $75/month with a $50 warning threshold. Cases and files
@@ -38,7 +55,13 @@ Native PDF text and the visual page viewer work without it.
 
 ## Bench workflow
 
-1. Create a repair with the symptom and board/revision if known.
+1. Open a **Board reference** to explore files without a symptom or outcome.
+   The private setup package includes A2338 / 820-02020 in this mode. Search
+   `U5200.A1` or `sheet 52`, and inspect **Files & photos** for import details.
+   When a physical repair is ready, choose **Start repair from these files**.
+   It reuses original files and indexed evidence but requires fresh scope checks;
+   it does not copy reference notes, model answers, measurements or outcomes.
+   A new repair without reference files is also available.
 2. Save readings and observations. Quick entry supports `PP3V3 = 3.28 V`,
    `U7000.1 = 12 kΩ` and `USB_D+ = diode 0.42 V`; review conditions before saving.
 3. Add photos, PDFs and boardviews. Check the visible import status and file scope.

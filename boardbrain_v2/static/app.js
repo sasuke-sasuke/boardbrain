@@ -49,7 +49,7 @@ function formAction(form, fn) {
 }
 function field(name,label,value='',extra='') { return `<label class="field">${esc(label)}<input name="${name}" value="${esc(value)}" ${extra}></label>`; }
 function footer(text) { return `<div class="form-footer"><button type="submit" class="primary">${text}</button></div>`; }
-function caseId() { if(!current) throw Error('Open a repair first.'); return current.id; }
+function caseId() { if(!current) throw Error('Open a workspace first.'); return current.id; }
 function draftSave() { if(current) sessionStorage.setItem(`bb-draft-${current.id}`, $('#question').value); }
 async function loadCase(id) {
   draftSave(); current = await api('/api/case?id='+encodeURIComponent(id));
@@ -94,13 +94,22 @@ function render() {
   const query=$('#case-search').value.toLowerCase();
   const cases=state.cases.filter(c=>`${c.title} ${c.board_id} ${c.symptom}`.toLowerCase().includes(query));
   $('#case-count').textContent=state.cases.length;
-  $('#case-list').innerHTML=cases.map(c=>`<button class="case-link ${current?.id===c.id?'active':''}" data-case="${c.id}"><strong>${esc(c.title)}</strong><small><span>${esc(c.board_id||c.device||'Board not identified')}</span><span>${c.status==='confirmed'?'✓ Fixed':c.status==='unresolved'?'Unresolved':'Open'}</span></small></button>`).join('') || '<p class="muted small">No repairs here yet.</p>';
+  $('#case-list').innerHTML=cases.map(c=>`<button class="case-link ${current?.id===c.id?'active':''}" data-case="${c.id}"><strong>${esc(c.title)}</strong><small><span>${esc(c.board_id||c.device||'Board not identified')}</span><span>${c.kind==='reference'?'Reference':c.status==='confirmed'?'✓ Fixed':c.status==='unresolved'?'Unresolved':'Open'}</span></small></button>`).join('') || '<p class="muted small">No workspaces here yet.</p>';
   $('#welcome').hidden=!!current; $('#case-workspace').hidden=!current;
   if(!current) return;
   renderAnalysisHint();
   $('#case-title').textContent=current.title; $('#case-symptom').textContent=current.symptom;
   $('#case-meta').textContent=[current.device||'REPAIR',current.board_id||'BOARD UNKNOWN',current.revision?`REV ${current.revision}`:'REVISION UNKNOWN'].join('  /  ');
-  $('#case-status').textContent=current.status==='confirmed'?'Repair confirmed':current.status;
+  const reference=current.kind==='reference';
+  $('#case-status').textContent=reference?'Reference only':current.status==='confirmed'?'Repair confirmed':current.status;
+  $('#outcome').hidden=reference; $('#start-from-reference').hidden=!reference;
+  for(const id of ['add-reading','add-pin','find-cases','readings-panel']) $('#'+id).hidden=reference;
+  $('#plan-label').textContent=reference?'EXPLORE THE REFERENCE':'NEXT USEFUL TEST';
+  $('#question-label').textContent=reference?'What would you like to find?':'What are you seeing?';
+  $('#question').placeholder=reference?'Ask about a component, net, or schematic page…':'Describe the symptom, ask about a reading, or tell me what changed…';
+  $('#ask').textContent=reference?'Ask about these files ↑':'Find the next step ↑';
+  $('#files-title').textContent=reference?'Board reference files':'Evidence for this repair';
+  $('#history-title').textContent=reference?'Reference history':'Repair timeline';
   $('#outcome').textContent=current.status==='open'?'Record outcome':'Reopen repair';
   $('#workspace-label').textContent=current.title;
   $('#file-count').textContent=current.sources.length;
@@ -123,14 +132,14 @@ function completed(test, planEvent) {
 function renderPlan() {
   const event=currentPlan(); evidence={...evidence,...(event?.data.evidence||{})};
   if(!event) {
-    $('#plan').innerHTML=`<div class="empty-plan"><h2>Let’s establish the starting point.</h2><p>Record what you’ve already checked, then ask for the next test. Add the boardview or a clear photo whenever you have one.</p><div class="small">${state.has_api_key?'Your observations stay saved between sessions.':'You can start saving evidence now. Add your API key in Settings for AI guidance.'}</div></div>`;
+    $('#plan').innerHTML=`<div class="empty-plan"><h2>${current.kind==='reference'?'Your board reference is ready to explore.':'Let’s establish the starting point.'}</h2><p>${current.kind==='reference'?'Search a component or net below, or open Files & photos to inspect the schematic and import details. No repair outcome is needed.':'Record what you’ve already checked, then ask for the next test. Add the boardview or a clear photo whenever you have one.'}</p><div class="small">${state.has_api_key?'Your observations stay saved between sessions.':'You can start saving evidence now. Add your API key in Settings for AI guidance.'}</div></div>`;
     $('#hypotheses').innerHTML=''; return;
   }
   const plan=event.data.plan, stale=event.data.stale||current.updated>event.created;
   $('#plan').innerHTML=(stale?'<div class="warning">This plan predates a case update. Completed readings are shown below; ask for an update before following an old next step.</div>':'')+plan.tests.map((t,i)=>{
     const done=completed(t,event);
     return `<article class="next-test"><div class="test-heading"><span class="step-number">${done?'✓':String(i+1).padStart(2,'0')}</span><h2>${esc(t.title)}</h2></div><div class="test-facts"><span>${esc(t.quantity)}</span>${t.target?`<span>${esc(evidence[t.pin_evidence_id]?.kind==='pin'?pinLabel(evidence[t.pin_evidence_id].data):t.target)}</span>${evidence[t.pin_evidence_id]?.data.net?`<span class="mono">${esc(evidence[t.pin_evidence_id].data.net)}</span>`:''}`:''}<span>${esc(powerLabel(t.power_state))}</span></div><p class="procedure">${esc(t.procedure)}</p>${t.reference?`<p class="small">Reference: ${esc(t.reference)}${t.polarity?` · ${esc(t.polarity)}`:''}</p>`:''}<details class="test-details"><summary>Why this test & what it tells us</summary><p>${esc(t.why)}</p><p>${esc(t.interpretation)}</p><p>${t.expected_quote?`Source excerpt: “${esc(t.expected_quote)}”`:'No verified numeric expected value is attached to this test.'}</p>${t.stop_if?`<p>Stop if: ${esc(t.stop_if)}</p>`:''}${[t.pin_evidence_id,t.expected_evidence_id,...t.evidence_ids].filter((x,i,a)=>x&&a.indexOf(x)===i).map(x=>`<button class="source-chip" data-evidence="${esc(x)}">${esc(evidenceLabel(x))}</button>`).join('')}</details>${t.quantity!=='observation'?`<button class="${done?'quiet':'secondary'}" data-test="${i}" ${stale&&!done?'disabled':''}>${done?'Reading recorded':'Record this reading'}</button>`:''}</article>`;
-  }).join('')+`<div class="summary">${esc(plan.summary)}</div>${event.data.model?`<p class="microcopy">${esc(modelLabel(event.data.model))} · ${event.data.analysis_mode==='deep'?'Deeper':'Standard'} analysis · Estimated $${Number(event.data.estimated_cost||0).toFixed(3)} · ${Number(event.data.elapsed_seconds||0).toFixed(1)} s</p>`:''}`+(plan.questions.length?`<div class="questions"><h3>To narrow this down</h3>${plan.questions.map(q=>`<p>${esc(q)}</p>`).join('')}</div>`:'');
+  }).join('')+`<div class="summary">${esc(plan.summary)}</div>${current.kind==='reference'&&Object.keys(event.data.evidence||{}).length?`<div class="panel form-gap"><h3>Evidence retrieved</h3>${Object.keys(event.data.evidence).slice(0,25).map(id=>`<button class="source-chip" data-evidence="${esc(id)}">${esc(evidenceLabel(id))}</button>`).join('')}</div>`:''}${event.data.model?`<p class="microcopy">${esc(modelLabel(event.data.model))} · ${event.data.analysis_mode==='deep'?'Deeper':'Standard'} analysis · Estimated $${Number(event.data.estimated_cost||0).toFixed(3)} · ${Number(event.data.elapsed_seconds||0).toFixed(1)} s</p>`:''}`+(plan.questions.length?`<div class="questions"><h3>To narrow this down</h3>${plan.questions.map(q=>`<p>${esc(q)}</p>`).join('')}</div>`:'');
   $('#hypotheses').innerHTML=(plan.hypotheses.length?`<div class="hypotheses"><div class="section-label">WORKING HYPOTHESES</div>${plan.hypotheses.map(h=>`<div class="hypothesis">${esc(h.idea)}<br><span>Support: ${h.support.length} sources · Contradictions: ${h.contradictions.length}</span>${[...h.support,...h.contradictions].filter((x,i,a)=>a.indexOf(x)===i).map(x=>`<button class="source-chip" data-evidence="${esc(x)}">${esc(evidenceLabel(x))}</button>`).join('')}</div>`).join('')}</div>`:'')+(plan.web_sources.length?`<div class="panel"><h3>Research references · verify applicability</h3>${plan.web_sources.map(s=>`<p class="small"><a href="${esc(s.url)}" target="_blank" rel="noreferrer noopener">${esc(s.title||s.url)} ↗</a></p>`).join('')}</div>`:'');
 }
 function pinLabel(d) { return `${d.ref}.${d.pin}${d.name&&d.name!==d.pin?` (label ${d.name})`:''}`; }
@@ -156,13 +165,14 @@ function renderTimeline() {
     return `<article class="timeline-item ${e.retracted?'retracted':''}"><div class="stamp">${esc(date(e.created))}${e.retracted?' · Retracted':''}</div><h3>${esc(title)}</h3><p>${esc(body)}</p>${['measurement','note','pin'].includes(e.kind)&&!e.retracted&&current.status==='open'?`<button class="quiet small" data-retract="${e.id}">Retract incorrect entry</button>`:''}</article>`;
   }).join('')||'<p class="muted">The first observation starts your timeline.</p>';
 }
-function newCase() {
-  modal('Start a repair',`<form id="new-form"><div class="fields"><div class="full">${field('title','Repair title','','required maxlength="120" placeholder="MacBook — no power"')}</div>${field('device','Device / model','','placeholder="MacBook Pro A…"')}${field('board_id','Board number','','placeholder="820-…"')}${field('revision','Board revision','','placeholder="Leave blank if unknown"')}<label class="field full">Symptom<textarea name="symptom" required maxlength="4000" placeholder="What happens when power is connected? What have you already tried?"></textarea></label></div>${footer('Open repair')}</form>`,()=>formAction($('#new-form'),async form=>{
-    const created=await api('/api/cases',Object.fromEntries(form));closeModal();await refresh();await loadCase(created.id);
+function newCase(kind='repair', reference=null) {
+  const isRef=kind==='reference';
+  modal(isRef?'Add board reference':'Start a repair',`<form id="new-form"><div class="fields"><div class="full">${field('title',isRef?'Reference title':'Repair title',reference?`${reference.device||reference.board_id} — `:'','required maxlength="120"')}</div>${field('device','Device / model',reference?.device||'','placeholder="MacBook Pro A…"')}${field('board_id','Board number',reference?.board_id||'','placeholder="820-…"')}${field('revision','Board revision',reference?.revision||'','placeholder="Leave blank if unknown"')}<label class="field full">${isRef?'Notes (optional)':'Symptom'}<textarea name="symptom" ${isRef?'':'required'} maxlength="4000" placeholder="${isRef?'Reference material for exploring and validating the files.':'What happens when power is connected? What have you already tried?'}"></textarea></label></div>${reference?'<p class="modal-copy form-gap">The original files and their imported evidence are reused. Scope checks must be confirmed for this physical board. Reference notes and AI answers stay in the reference workspace.</p>':''}${footer(isRef?'Open reference':'Open repair')}</form>`,()=>formAction($('#new-form'),async form=>{
+    const created=await api('/api/cases',{...Object.fromEntries(form),kind,...(reference?{reference_id:reference.id}:{})});closeModal();await refresh();tab=isRef?'files':'bench';await loadCase(created.id);
   }));
 }
 function editCase() {
-  modal('Repair details',`<form id="edit-form"><div class="fields"><div class="full">${field('title','Repair title',current.title,'required maxlength="120"')}</div>${field('device','Device / model',current.device)}${field('board_id','Board number',current.board_id)}${field('revision','Board revision',current.revision)}<label class="field full">Symptom<textarea name="symptom" required>${esc(current.symptom)}</textarea></label></div><p class="modal-copy form-gap">Changing the board number or revision resets file scope checks and retracts checked pin mappings. Recheck them against the corrected board identity.</p>${footer('Save details')}</form>`,()=>formAction($('#edit-form'),async form=>{await api('/api/case-details',{case_id:caseId(),...Object.fromEntries(form)});closeModal();await refresh();}));
+  modal(current.kind==='reference'?'Reference details':'Repair details',`<form id="edit-form"><div class="fields"><div class="full">${field('title',current.kind==='reference'?'Reference title':'Repair title',current.title,'required maxlength="120"')}</div>${field('device','Device / model',current.device)}${field('board_id','Board number',current.board_id)}${field('revision','Board revision',current.revision)}<label class="field full">${current.kind==='reference'?'Notes':'Symptom'}<textarea name="symptom" required>${esc(current.symptom)}</textarea></label></div><p class="modal-copy form-gap">Changing the board number or revision resets file scope checks and retracts checked pin mappings. Recheck them against the corrected board identity.</p>${footer('Save details')}</form>`,()=>formAction($('#edit-form'),async form=>{await api('/api/case-details',{case_id:caseId(),...Object.fromEntries(form)});closeModal();await refresh();}));
 }
 function settings() {
   const s=state.settings;
@@ -251,7 +261,7 @@ document.addEventListener('click',async event=>{
   }catch(e){notice(e.message);}
 });
 document.addEventListener('change',event=>{const id=event.target.dataset.photo;if(id){if(event.target.checked&&selectedPhotos.size>=2){event.target.checked=false;notice('Choose up to two photos for one question.');return;}event.target.checked?selectedPhotos.add(id):selectedPhotos.delete(id);}});
-$('#new-case').onclick=newCase;$('#welcome-new').onclick=newCase;$('#settings-button').onclick=settings;$('#close-modal').onclick=closeModal;
+$('#new-case').onclick=()=>newCase();$('#welcome-new').onclick=()=>newCase();$('#new-reference').onclick=()=>newCase('reference');$('#start-from-reference').onclick=()=>newCase('repair',current);$('#settings-button').onclick=settings;$('#close-modal').onclick=closeModal;
 $('#edit-case').onclick=editCase;
 $('#case-search').oninput=render;$('#add-reading').onclick=()=>addReading();$('#add-note').onclick=addNote;$('#add-pin').onclick=addPin;$('#outcome').onclick=outcome;$('#upload-button').onclick=upload;
 $('#deep-analysis').onchange=renderAnalysisHint;
@@ -262,4 +272,4 @@ $('#backup').onclick=async()=>{try{const result=await api('/api/backup',{});awai
 $('#find-cases').onclick=async()=>{try{const found=await api(`/api/confirmed?case_id=${caseId()}&q=${encodeURIComponent(current.symptom)}`);modal('Confirmed repair references',found.map(c=>`<div class="panel"><h3>${esc(c.title)}</h3><span class="pill ${c.same_board_revision?'':'warn'}">${c.same_board_revision?'Same board / revision':'Different or unknown board / revision'}</span><p class="small form-gap">${esc(c.symptom)}</p><p class="small">Fix: ${esc(c.outcome.fix)}</p><p class="small muted">Verified by: ${esc(c.outcome.verification)}<br>Cause: ${esc(c.outcome.cause_status)}</p></div>`).join('')||'<p class="modal-copy">No relevant confirmed repairs yet. Record a fix and post-repair verification to build this reference set.</p>');}catch(e){notice(e.message);}};
 $('#quit').onclick=async()=>{try{draftSave();await api('/api/quit',{});notice('BoardBrain has closed. Reopen it from the app icon.');}catch(e){notice(e.message);}};
 window.addEventListener('beforeunload',draftSave);
-(async()=>{await refresh();const previous=sessionStorage.getItem('bb-case');if(previous&&state?.cases.some(c=>c.id===previous))await loadCase(previous);setInterval(refresh,2200);})();
+(async()=>{await refresh();const previous=sessionStorage.getItem('bb-case');if(previous&&state?.cases.some(c=>c.id===previous))await loadCase(previous);else if(state?.cases.length===1)await loadCase(state.cases[0].id);setInterval(refresh,2200);})();

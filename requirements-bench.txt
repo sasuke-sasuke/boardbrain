@@ -4,4 +4,4 @@ PyMuPDF>=1.25.5,<2
 pillow-heif>=0.22,<2
 keyring>=25.6,<26
 certifi>=2025.1.31
-pywebview>=5.4,<7; sys_platform == 'darwin'
+pywebview>=6.2.1,<7; sys_platform == 'darwin'
