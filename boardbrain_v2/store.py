@@ -97,7 +97,7 @@ class Store:
         if set(data) - set(DEFAULT_SETTINGS):
             raise ValueError("Unknown setting")
         proposed = self.settings() | data
-        if proposed["model"] not in ("gpt-6.1-sol", "gpt-5.4"):
+        if proposed["model"] not in ("gpt-6.1-sol", "gpt-6-astra", "gpt-5.4"):
             raise ValueError("Select a supported model with known pricing.")
         if not 1 <= float(proposed["monthly_limit"]) <= 1000:
             raise ValueError("Monthly limit must be $1–$1000.")

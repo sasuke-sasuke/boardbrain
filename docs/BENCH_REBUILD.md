@@ -8,6 +8,8 @@ the native Mac window must be tested before relying on it in production repairs.
 
 - One Mac at the bench; typed observations and selected photos first. Voice later.
 - FlexBV remains the board viewer; the initial configuration records version 5.1244.
+- Validate one matching boardview/schematic pair and exact revision before adding
+  other boards or parser variants. The technician supplies the first pair.
 - SQLite and original files stay local. Only explicitly requested AI work is paid.
 - Start with a $75/month app limit and a $50 warning threshold; both are editable.
 - Scope/logic-analyzer procedures require exact instrument/probe details and ground
@@ -45,11 +47,47 @@ before real-board validation. Native UI testing is still required.
 - No automatic retries of paid calls. Cancellation stops further work; a request
   already received by the provider may still incur a charge. Missing billing
   information or a dropped connection keeps a conservative reserved charge.
-- $3 reserved per assistant turn; actual estimated usage replaces the reservation
+- $3 reserved per Sol turn, $15 per Astra turn; actual estimated usage replaces the reservation
   when available. This is an app-local, conservative budget guard, not a provider
   account-wide hard cap. Other apps and invoice adjustments are outside it.
 - API keys in the system keychain, no plaintext key in exports, a single-instance
   launcher, an Apple Silicon build recipe, a CI package/smoke test, and backups.
+
+## Models and jobs
+
+The legacy app defaulted to `gpt-4o`. This preview uses the Responses API with
+`gpt-6.1-sol` as its default. Model access and live performance are unverified until
+an API account and the first board's evidence are available.
+
+| Job | Initial implementation | Reason |
+| --- | --- | --- |
+| Boardview parsing, exact pins/nets, units, lookup | Deterministic local code | Preserve identities and validate structural data without model guesses. |
+| Normal diagnostic questions, typed observations, selected photos, optional source research | GPT-6.1 Sol, medium reasoning | Initial quality/cost balance to test at the bench. |
+| Difficult cases or reconsidering an unproductive diagnosis | GPT-6 Astra, high reasoning through Deeper analysis | A more capable reasoning option, evaluated on the same evidence. |
+| Case tags, clerical cleanup, concise indexing | Existing local storage for now; GPT-6 Luna is a later candidate | Add a small model only after a concrete task demonstrates useful savings and acceptable errors. |
+
+Deeper analysis is a per-question choice. It uses Astra for that turn's bounded
+tool loop, retains the same evidence gates and does not change the normal model
+setting. The model, reasoning effort, elapsed time and cost estimate are recorded.
+Online research remains an independent choice. There is no automatic second-model
+vote, automatic paid retry, silent fallback, or validated difficulty classifier.
+Agreement between models is not independent verification of a pin or diagnosis.
+Previous preview settings for GPT-5.4 remain readable; new installations use Sol.
+
+Checked official standard short-context rates on 2026-10-18: Sol $2 input / $10
+output, Astra $10 input / $50 output per million tokens. Reasoning output also
+consumes the output budget. The app conservatively estimates all input at the
+cache-write rate ($2.50 / $12.50 respectively), without assuming cache savings.
+It reserves $3 for Sol or $15 for Astra before starting and releases the unused
+amount when usage is returned. Those reservations are not predicted turn prices;
+timeouts without usable billing details keep the reservation as uncertain spend.
+The monthly app limit starts at $75 with a $50 warning. Access, latency and actual
+repair costs must be measured; no number of monthly repairs is promised.
+
+Sol and Astra are the initial candidates, not a claim that either is universally
+best for electronics diagnosis. The one-board trial determines the production
+default and useful escalation conditions. Any later provider/model must pass the
+same board-specific evaluation before routing diagnostic work to it.
 
 ## Accuracy boundaries
 
@@ -76,20 +114,36 @@ possible unsafe or incorrect instruction.
 
 ## Real-board acceptance gate
 
-1. Supply 2–4 actual boardviews across the formats used in the shop, matching
-   schematics where available, and FlexBV screenshots of several exact pins.
-2. For each supported variant, compare pin numbers, net spelling, side, coordinate
-   transforms, total counts, disconnected pins and duplicate/subboard behavior.
-   Add legally shareable synthetic/minimal regression fixtures; keep customer and
-   proprietary data out of this public repository.
-3. Replay repairs with known outcomes while hiding the fix from the assistant.
-   Include no-schematic, contradictory-reading, unknown-board and scanned-PDF cases.
-4. Compare bench minutes, repeated measurements, corrections, unsupported exact
-   claims, provider cost and response latency against the technician's baseline.
-   Initial goals from the research are targets, not measured performance promises.
-5. Verify native Mac launch/relaunch, Keychain prompts, photo uploads, PDF viewing,
-   downloads, cancel/retry, backup/restore and offline case access on the actual Mac.
-6. Only after these gates should the preview replace the existing shop workflow.
+1. Supply **one boardview and its matching schematic PDF for one exact board and
+   revision**. Prefer a familiar repair with a known outcome. Record file hashes,
+   board identifiers and revision; resolve mismatches before trusting connectivity.
+2. Validate that file's adapter against FlexBV 5.1244: total parts/pins/nets,
+   exact pin numbers and net spelling, side, coordinate transforms, disconnected
+   pins and any duplicate/subboard behavior. Compare all records where a trusted
+   reference is available, plus technician-checked points on both sides and at
+   orientation-sensitive locations. Sampling alone does not validate every pin.
+   Check schematic page references and quoted values in the original PDF.
+3. Build a small, checked question set from that board: exact lookups, relevant
+   schematic passages, missing evidence, contradictory readings, and next-test
+   decisions. Preserve the correct answers privately. Exact lookup/reference
+   questions must have zero unresolved mismatches before diagnostic evaluation.
+4. Replay the known repair with the outcome hidden. Give Sol and Astra identical
+   evidence snapshots, without either seeing the other's answer. Record factual
+   errors, unnecessary/repeated tests, useful next steps, response time, cost and
+   technician corrections. Log the model/settings and repeat ambiguous results.
+   Track bench minutes against the technician's baseline. A single board/case
+   establishes a narrow pilot, not general diagnostic accuracy or guaranteed speed.
+5. Verify launch/relaunch, Keychain, photos, PDF viewing, cancel/retry, backup/restore
+   and offline case access on the actual Mac. Complete one supervised repair
+   workflow from intake through measured post-repair verification.
+6. After that pilot passes, add the next board or format one at a time with its
+   own evidence checks. Then evaluate no-schematic and scanned-document workflows.
+   Do not expand coverage or replace the shop workflow based on synthetic tests.
+
+Private boardviews, schematics and repair histories stay outside this public
+repository. Only legally shareable synthetic/minimal regression fixtures belong
+in the codebase. Current gate status: awaiting the first matching pair; no real
+board or live model acceptance results have been recorded.
 
 ## Data and recovery
 
@@ -110,7 +164,11 @@ backup database with unrelated old WAL/SHM files.
 
 ## Verification recorded for this draft
 
-- 34 local Python tests passed; Python, JavaScript and shell syntax checks passed.
+- 38 local Python tests passed on 2026-10-18, including Astra routing with the same
+  case evidence, per-model cost settlement, budget rejection before any request,
+  network uncertainty without fallback, and evidence rejection for both models.
+  Python compilation and JavaScript syntax checks passed after the routing change;
+  shell syntax checks passed in the original rebuild.
 - The local service was started in a fresh temporary data directory and its
   authenticated state endpoint responded successfully without an API key.
 - The browser workflow test is provided but could not execute here: Chromium's
@@ -129,10 +187,12 @@ backup database with unrelated old WAL/SHM files.
 - [Structured outputs](https://developers.openai.com/api/docs/guides/structured-outputs)
 - [Web search](https://developers.openai.com/api/docs/guides/tools-web-search)
 - [GPT-6.1 Sol model](https://developers.openai.com/api/docs/models/gpt-6.1-sol)
+- [GPT-6 Astra model](https://developers.openai.com/api/docs/models/gpt-6-astra)
+- [Model selection](https://developers.openai.com/api/docs/guides/model-selection)
 - [API pricing](https://developers.openai.com/api/docs/pricing)
 - [pywebview API](https://pywebview.flowrl.com/api/)
 - [PyInstaller usage](https://pyinstaller.org/en/stable/usage.html)
 - [macOS keyring backend](https://keyring.readthedocs.io/en/latest/)
 
-Rates/model compatibility were checked on 2026-10-17; update the bounded provider
+Rates/model compatibility were checked on 2026-10-18; update the bounded provider
 adapter and rates together when changing the model selection.

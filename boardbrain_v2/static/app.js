@@ -8,6 +8,12 @@ let state = null, current = null, tab = 'bench', evidence = {}, seenJobs = new M
 const selectedPhotos = new Set();
 const dismissedJobs = new Set();
 const units = {voltage:'V',resistance:'Ω',diode:'V',current:'A',frequency:'Hz',continuity:''};
+const modelLabel = model => ({'gpt-6.1-sol':'GPT-6.1 Sol','gpt-6-astra':'GPT-6 Astra','gpt-5.4':'GPT-5.4'}[model] || model);
+function renderAnalysisHint() {
+  if(!state) return;
+  const deep=$('#deep-analysis').checked, model=deep?'gpt-6-astra':state.settings.model;
+  $('#analysis-hint').textContent=`${modelLabel(model)} · ${deep?'Deeper analysis for difficult cases; allow more time.':'Standard analysis.'} ${model==='gpt-6-astra'?'$15':'$3'} temporarily reserved from your app budget; unused amount released after billing details arrive.`;
+}
 const powerLabel = p => ({unpowered:'Unpowered',standby:'Standby',attempting_boot:'Attempting boot',running:'Running',unknown:'State unknown'}[p] || p);
 const date = value => new Date(value).toLocaleString([], {month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'});
 function notice(text) { $('#notice').textContent = text; $('#notice').hidden = !text; }
@@ -48,6 +54,7 @@ function draftSave() { if(current) sessionStorage.setItem(`bb-draft-${current.id
 async function loadCase(id) {
   draftSave(); current = await api('/api/case?id='+encodeURIComponent(id));
   sessionStorage.setItem('bb-case', id); selectedPhotos.clear(); evidence={}; lastCaseSignature='';
+  $('#deep-analysis').checked=false;
   $('#question').value = sessionStorage.getItem(`bb-draft-${id}`) || '';
   $('#lookup-results').innerHTML = '<p class="muted small">Search this repair’s evidence. Exact punctuation is preserved.</p>';
   render();
@@ -90,6 +97,7 @@ function render() {
   $('#case-list').innerHTML=cases.map(c=>`<button class="case-link ${current?.id===c.id?'active':''}" data-case="${c.id}"><strong>${esc(c.title)}</strong><small><span>${esc(c.board_id||c.device||'Board not identified')}</span><span>${c.status==='confirmed'?'✓ Fixed':c.status==='unresolved'?'Unresolved':'Open'}</span></small></button>`).join('') || '<p class="muted small">No repairs here yet.</p>';
   $('#welcome').hidden=!!current; $('#case-workspace').hidden=!current;
   if(!current) return;
+  renderAnalysisHint();
   $('#case-title').textContent=current.title; $('#case-symptom').textContent=current.symptom;
   $('#case-meta').textContent=[current.device||'REPAIR',current.board_id||'BOARD UNKNOWN',current.revision?`REV ${current.revision}`:'REVISION UNKNOWN'].join('  /  ');
   $('#case-status').textContent=current.status==='confirmed'?'Repair confirmed':current.status;
@@ -122,7 +130,7 @@ function renderPlan() {
   $('#plan').innerHTML=(stale?'<div class="warning">This plan predates a case update. Completed readings are shown below; ask for an update before following an old next step.</div>':'')+plan.tests.map((t,i)=>{
     const done=completed(t,event);
     return `<article class="next-test"><div class="test-heading"><span class="step-number">${done?'✓':String(i+1).padStart(2,'0')}</span><h2>${esc(t.title)}</h2></div><div class="test-facts"><span>${esc(t.quantity)}</span>${t.target?`<span>${esc(t.target)}</span>`:''}<span>${esc(powerLabel(t.power_state))}</span></div><p class="procedure">${esc(t.procedure)}</p>${t.reference?`<p class="small">Reference: ${esc(t.reference)}${t.polarity?` · ${esc(t.polarity)}`:''}</p>`:''}<details class="test-details"><summary>Why this test & what it tells us</summary><p>${esc(t.why)}</p><p>${esc(t.interpretation)}</p><p>${t.expected_quote?`Source excerpt: “${esc(t.expected_quote)}”`:'No verified numeric expected value is attached to this test.'}</p>${t.stop_if?`<p>Stop if: ${esc(t.stop_if)}</p>`:''}${[t.pin_evidence_id,t.expected_evidence_id,...t.evidence_ids].filter((x,i,a)=>x&&a.indexOf(x)===i).map(x=>`<button class="source-chip" data-evidence="${esc(x)}">${esc(x)}</button>`).join('')}</details>${t.quantity!=='observation'?`<button class="${done?'quiet':'secondary'}" data-test="${i}" ${stale&&!done?'disabled':''}>${done?'Reading recorded':'Record this reading'}</button>`:''}</article>`;
-  }).join('')+`<div class="summary">${esc(plan.summary)}</div>`+(plan.questions.length?`<div class="questions"><h3>To narrow this down</h3>${plan.questions.map(q=>`<p>${esc(q)}</p>`).join('')}</div>`:'');
+  }).join('')+`<div class="summary">${esc(plan.summary)}</div>${event.data.model?`<p class="microcopy">${esc(modelLabel(event.data.model))} · ${event.data.analysis_mode==='deep'?'Deeper':'Standard'} analysis · Estimated $${Number(event.data.estimated_cost||0).toFixed(3)} · ${Number(event.data.elapsed_seconds||0).toFixed(1)} s</p>`:''}`+(plan.questions.length?`<div class="questions"><h3>To narrow this down</h3>${plan.questions.map(q=>`<p>${esc(q)}</p>`).join('')}</div>`:'');
   $('#hypotheses').innerHTML=(plan.hypotheses.length?`<div class="hypotheses"><div class="section-label">WORKING HYPOTHESES</div>${plan.hypotheses.map(h=>`<div class="hypothesis">${esc(h.idea)}<br><span>Support: ${h.support.length} sources · Contradictions: ${h.contradictions.length}</span>${[...h.support,...h.contradictions].filter((x,i,a)=>a.indexOf(x)===i).map(x=>`<button class="source-chip" data-evidence="${esc(x)}">${esc(x)}</button>`).join('')}</div>`).join('')}</div>`:'')+(plan.web_sources.length?`<div class="panel"><h3>Research references · verify applicability</h3>${plan.web_sources.map(s=>`<p class="small"><a href="${esc(s.url)}" target="_blank" rel="noreferrer noopener">${esc(s.title||s.url)} ↗</a></p>`).join('')}</div>`:'');
 }
 function readingLabel(d) { return `${d.value} ${d.unit}`.trim(); }
@@ -140,7 +148,7 @@ function renderTimeline() {
     else if(e.kind==='message'){title='You asked';body=d.text;}
     else if(e.kind==='note'){title='Observation';body=d.text;}
     else if(e.kind==='pin'){title=`Checked mapping · ${d.ref}.${d.pin} → ${d.net}`;body=d.basis;}
-    else if(e.kind==='plan'){title='Assistant plan';body=d.plan.summary;}
+    else if(e.kind==='plan'){title=d.model?`Assistant plan · ${modelLabel(d.model)}`:'Assistant plan';body=d.plan.summary;}
     else if(e.kind==='outcome'){title=d.status==='confirmed'?'Repair confirmed':d.status==='open'?'Repair reopened':'Repair unresolved';body=d.status==='confirmed'?`Fix: ${d.fix}\nVerification: ${d.verification}\nRoot cause: ${d.cause_status}${d.root_cause?' — '+d.root_cause:''}`:d.reason||'';}
     return `<article class="timeline-item ${e.retracted?'retracted':''}"><div class="stamp">${esc(date(e.created))}${e.retracted?' · Retracted':''}</div><h3>${esc(title)}</h3><p>${esc(body)}</p>${['measurement','note','pin'].includes(e.kind)&&!e.retracted&&current.status==='open'?`<button class="quiet small" data-retract="${e.id}">Retract incorrect entry</button>`:''}</article>`;
   }).join('')||'<p class="muted">The first observation starts your timeline.</p>';
@@ -155,7 +163,7 @@ function editCase() {
 }
 function settings() {
   const s=state.settings;
-  modal('Settings & equipment',`<form id="settings-form"><p class="modal-copy">Cases and files are stored on this Mac. AI requests use your OpenAI API account. Your key is saved in macOS Keychain.</p><div class="fields"><label class="field full">OpenAI API key<input name="api_key" type="password" autocomplete="new-password" placeholder="${state.has_api_key?'Key saved · leave blank to keep it':'sk-…'}"><span class="hint">Never included in case exports or backups.</span></label><label class="field full">Assistant model<select name="model"><option value="gpt-6.1-sol" ${s.model==='gpt-6.1-sol'?'selected':''}>GPT-6.1 Sol</option><option value="gpt-5.4" ${s.model==='gpt-5.4'?'selected':''}>GPT-5.4</option></select><span class="hint">Account access and repair performance still need validation.</span></label>${field('monthly_limit','Monthly app limit ($)',s.monthly_limit,'type="number" min="1" max="1000" required')}${field('warning_at','Warn at ($)',s.warning_at,'type="number" min="0" required')}<label class="field full">Your bench equipment<textarea name="equipment" rows="5" required>${esc(s.equipment)}</textarea><span class="hint">Add the exact scope, probes and logic-analyzer models when available.</span></label>${field('flexbv_version','FlexBV version',s.flexbv_version,'required')}</div><p class="modal-copy form-gap">Usage is a conservative app estimate, not your provider’s invoice. A request temporarily reserves $3; unused reservation is released when billing details arrive. An interrupted connection keeps the reservation as an uncertain charge. Other apps using the same key are not counted.</p>${footer('Save settings')}</form>`,()=>formAction($('#settings-form'),async form=>{
+  modal('Settings & equipment',`<form id="settings-form"><p class="modal-copy">Cases and files are stored on this Mac. AI requests use your OpenAI API account. Your key is saved in macOS Keychain.</p><div class="fields"><label class="field full">OpenAI API key<input name="api_key" type="password" autocomplete="new-password" placeholder="${state.has_api_key?'Key saved · leave blank to keep it':'sk-…'}"><span class="hint">Never included in case exports or backups.</span></label><label class="field full">Standard analysis model<select name="model"><option value="gpt-6.1-sol" ${s.model==='gpt-6.1-sol'?'selected':''}>GPT-6.1 Sol</option><option value="gpt-6-astra" ${s.model==='gpt-6-astra'?'selected':''}>GPT-6 Astra</option>${s.model==='gpt-5.4'?'<option value="gpt-5.4" selected>GPT-5.4 (previous preview setting)</option>':''}</select><span class="hint">Default: GPT-6.1 Sol. Deeper analysis uses GPT-6 Astra. Account access and repair performance still need validation.</span></label>${field('monthly_limit','Monthly app limit ($)',s.monthly_limit,'type="number" min="1" max="1000" required')}${field('warning_at','Warn at ($)',s.warning_at,'type="number" min="0" required')}<label class="field full">Your bench equipment<textarea name="equipment" rows="5" required>${esc(s.equipment)}</textarea><span class="hint">Add the exact scope, probes and logic-analyzer models when available.</span></label>${field('flexbv_version','FlexBV version',s.flexbv_version,'required')}</div><p class="modal-copy form-gap">Usage is a conservative app estimate, not your provider’s invoice. A request temporarily reserves $3 for Sol or $15 for Astra; unused reservation is released when billing details arrive. An interrupted connection keeps the reservation as an uncertain charge. Other apps using the same key are not counted.</p>${footer('Save settings')}</form>`,()=>formAction($('#settings-form'),async form=>{
     const data=Object.fromEntries(form);data.monthly_limit=Number(data.monthly_limit);data.warning_at=Number(data.warning_at);await api('/api/settings',data);closeModal();await refresh();notice('Settings saved.');
   }));
 }
@@ -214,7 +222,7 @@ async function lookup(event) {
 }
 async function ask() {
   const text=$('#question').value.trim();if(!text){$('#question').focus();return;}
-  try {draftSave();const id=caseId();const job=await api('/api/ask',{case_id:id,question:text,photo_ids:[...selectedPhotos],research:$('#research').checked});pendingQuestions.set(job.id,{caseId:id,text});notice('');await refresh();}
+  try {draftSave();const id=caseId();const job=await api('/api/ask',{case_id:id,question:text,photo_ids:[...selectedPhotos],research:$('#research').checked,deep_analysis:$('#deep-analysis').checked});pendingQuestions.set(job.id,{caseId:id,text});notice('');await refresh();}
   catch(e){notice(e.message);}
 }
 async function download(blob,name){const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}
@@ -240,6 +248,7 @@ document.addEventListener('change',event=>{const id=event.target.dataset.photo;i
 $('#new-case').onclick=newCase;$('#welcome-new').onclick=newCase;$('#settings-button').onclick=settings;$('#close-modal').onclick=closeModal;
 $('#edit-case').onclick=editCase;
 $('#case-search').oninput=render;$('#add-reading').onclick=()=>addReading();$('#add-note').onclick=addNote;$('#add-pin').onclick=addPin;$('#outcome').onclick=outcome;$('#upload-button').onclick=upload;
+$('#deep-analysis').onchange=renderAnalysisHint;
 $('#lookup-form').onsubmit=lookup;$('#ask').onclick=ask;$('#question').oninput=draftSave;
 $('#question').onkeydown=event=>{if((event.metaKey||event.ctrlKey)&&event.key==='Enter'){event.preventDefault();ask();}};
 $('#export-case').onclick=async()=>{try{await download(new Blob([JSON.stringify(current,null,2)],{type:'application/json'}),`${current.id}-repair.json`);}catch(e){notice(e.message);}};

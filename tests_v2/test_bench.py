@@ -316,9 +316,68 @@ class AssistantTests(unittest.TestCase):
         result=assistant.run(self.a,"What next?",[],False,threading.Event(),lambda _:None)
         self.assertIn("plan_id",result)
         self.assertEqual(len(recorded),2)
+        self.assertEqual(recorded[0]["model"],"gpt-6.1-sol")
+        self.assertEqual(recorded[0]["reasoning"],{"effort":"medium"})
         self.assertFalse(recorded[0]["store"])
         self.assertNotIn("web_search",[t["type"] for t in recorded[0]["tools"]])
         self.assertEqual(self.store.usage_summary()["reserved"],0)
+        self.assertGreater(self.store.usage_summary()["estimated_cost"],0)
+
+    def test_deeper_analysis_routes_evidence_and_settles_astra_cost(self):
+        checked=self.store.capture(self.a,"measurement",reading())
+        recorded=[]
+        def factory(_):
+            class Fake:
+                def respond(inner,payload):
+                    recorded.append(payload)
+                    self.assertEqual(self.store.usage_summary()["reserved"],15)
+                    self.assertIn(checked["id"],payload["input"][0]["content"][0]["text"])
+                    p=plan();p["tests"][0].update(pin_evidence_id=checked["id"],evidence_ids=[checked["id"]])
+                    return final_response(p)
+            return Fake()
+        assistant=Assistant(self.store,type("Keys",(),{"get":lambda _:"fake"})(),factory)
+        result=assistant.run(self.a,"Reconsider this reading",[],False,threading.Event(),lambda _:None,deep_analysis=True)
+        self.assertEqual(len(recorded),1)
+        self.assertEqual(recorded[0]["model"],"gpt-6-astra")
+        self.assertEqual(recorded[0]["reasoning"],{"effort":"high"})
+        self.assertNotIn("web_search",[t["type"] for t in recorded[0]["tools"]])
+        self.assertEqual(self.store.settings()["model"],"gpt-6.1-sol")
+        self.assertAlmostEqual(result["estimated_cost"],0.0175)
+        self.assertEqual(self.store.usage_summary()["reserved"],0)
+        saved=next(e for e in self.store.case(self.a)["events"] if e["id"]==result["plan_id"])
+        self.assertEqual(saved["data"]["model"],"gpt-6-astra")
+        self.assertEqual(saved["data"]["analysis_mode"],"deep")
+        self.assertGreaterEqual(saved["data"]["elapsed_seconds"],0)
+
+    def test_astra_budget_blocks_before_provider_or_message(self):
+        self.store.set_settings({"monthly_limit":10,"warning_at":5})
+        def unexpected(_):raise AssertionError("No paid call should start")
+        assistant=Assistant(self.store,type("Keys",(),{"get":lambda _:"fake"})(),unexpected)
+        with self.assertRaises(ValueError):
+            assistant.run(self.a,"Think deeper",[],False,threading.Event(),lambda _:None,deep_analysis=True)
+        self.assertFalse(self.store.case(self.a)["events"])
+        self.assertEqual(self.store.usage_summary()["reserved"],0)
+
+    def test_astra_network_uncertainty_keeps_astra_reservation_without_fallback(self):
+        calls=[]
+        class Fake:
+            def respond(_,payload):
+                calls.append(payload["model"])
+                raise ProviderError("Timed out",True)
+        assistant=Assistant(self.store,type("Keys",(),{"get":lambda _:"fake"})(),lambda _:Fake())
+        with self.assertRaises(ProviderError):
+            assistant.run(self.a,"Think deeper",[],False,threading.Event(),lambda _:None,deep_analysis=True)
+        self.assertEqual(calls,["gpt-6-astra"])
+        self.assertEqual(self.store.usage_summary()["estimated_cost"],15)
+        self.assertFalse(any(e["kind"]=="plan" for e in self.store.case(self.a)["events"]))
+
+    def test_deeper_analysis_cannot_bypass_evidence_gate(self):
+        class Fake:
+            def respond(_,payload):return final_response(plan())
+        assistant=Assistant(self.store,type("Keys",(),{"get":lambda _:"fake"})(),lambda _:Fake())
+        with self.assertRaises(ValueError):
+            assistant.run(self.a,"Think deeper",[],True,threading.Event(),lambda _:None,deep_analysis=True)
+        self.assertFalse(any(e["kind"]=="plan" for e in self.store.case(self.a)["events"]))
         self.assertGreater(self.store.usage_summary()["estimated_cost"],0)
 
     def test_incomplete_response_never_saves_partial_advice(self):

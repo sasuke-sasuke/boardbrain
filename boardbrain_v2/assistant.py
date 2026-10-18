@@ -8,19 +8,22 @@ import re
 import ssl
 import sys
 import threading
+import time
 import urllib.error
 import urllib.request
 from urllib.parse import urlparse
 
 from .store import Store, dumps, require_text
 
-# Standard short-context rates, checked against official docs 2026-10-17.
+# Standard short-context rates, checked against official docs 2026-10-18.
 # Cache writes are charged conservatively at their higher rate. This is an app
 # estimate, never a promise about the account's invoice or other applications.
-PRICES = {"gpt-6.1-sol": (2.5, 10.0), "gpt-5.4": (2.5, 15.0)}
+PRICES = {"gpt-6.1-sol": (2.5, 10.0), "gpt-6-astra": (12.5, 50.0), "gpt-5.4": (2.5, 15.0)}
+DEEP_MODEL = "gpt-6-astra"
 MAX_ROUNDS = 3
 MAX_OUTPUT = 6000
 RESERVE_PER_TURN = 3.0
+DEEP_RESERVE_PER_TURN = 15.0
 
 
 class KeyStore:
@@ -74,7 +77,7 @@ class OpenAIProvider:
                                          headers={"Content-Type": "application/json", "Authorization": "Bearer " + self.key})
         try:
             https = urllib.request.HTTPSHandler(context=ssl.create_default_context(cafile=certifi.where()))
-            with urllib.request.build_opener(NoRedirect, https).open(request, timeout=75) as response:
+            with urllib.request.build_opener(NoRedirect, https).open(request, timeout=180 if payload["model"] == DEEP_MODEL else 75) as response:
                 data = response.read(8 * 1024 * 1024 + 1)
                 if len(data) > 8 * 1024 * 1024:
                     raise ProviderError("The provider response was too large. No advice was saved.", True)
@@ -83,7 +86,7 @@ class OpenAIProvider:
             messages = {400: "The AI request was rejected. Check model compatibility; no automatic retry was made.",
                         401: "The API key was rejected. Update it in Settings.",
                         403: "This API account cannot access the selected model.",
-                        404: "This model is unavailable to this account. Select another model in Settings.",
+                        404: "This model is unavailable to this account. Check model access, or choose another analysis mode/model. No automatic fallback was made.",
                         429: "The API account hit a rate or credit limit. Your case is saved; retry later."}
             raise ProviderError(messages.get(exc.code, "The AI service returned an error. Your case is saved."), exc.code >= 500) from None
         except (TimeoutError, OSError, ValueError) as exc:
@@ -249,7 +252,7 @@ class Assistant:
         self.store, self.keys, self.provider_factory = store, keys, provider_factory
         self.lock = threading.Lock()
 
-    def run(self, case_id: str, question: str, photo_ids: list[str], research: bool, cancel, progress):
+    def run(self, case_id: str, question: str, photo_ids: list[str], research: bool, cancel, progress, *, deep_analysis=False):
         question = require_text(question, "Question", 6000)
         if len(photo_ids) > 2:
             raise ValueError("Choose up to two photos per question.")
@@ -259,13 +262,20 @@ class Assistant:
         if not self.lock.acquire(blocking=False):
             raise ValueError("An assistant request is already running.")
         try:
-            return self._run(case_id, question, photo_ids, research, cancel, progress, key)
+            return self._run(case_id, question, photo_ids, research, cancel, progress, key, deep_analysis)
         finally:
             self.lock.release()
 
-    def _run(self, case_id, question, photo_ids, research, cancel, progress, key):
+    def _run(self, case_id, question, photo_ids, research, cancel, progress, key, deep_analysis):
         case = self.store.case(case_id)
         settings = self.store.settings()
+        model = DEEP_MODEL if deep_analysis else settings["model"]
+        if model not in PRICES:
+            raise ValueError("Select a supported model with known pricing in Settings.")
+        effort = "high" if deep_analysis else "medium"
+        reservation = DEEP_RESERVE_PER_TURN if model == DEEP_MODEL else RESERVE_PER_TURN
+        route = {"model": model, "reasoning_effort": effort,
+                 "analysis_mode": "deep" if deep_analysis else "standard"}
         evidence = {e["id"]: e for e in case["events"] if not e["retracted"] and e["kind"] in ("note", "measurement", "pin")}
         for e in evidence.values():
             if e["kind"] == "pin":
@@ -304,10 +314,11 @@ class Assistant:
         tools = list(TOOLS)
         if research:
             tools.append({"type": "web_search", "search_context_size": "low"})
-        request_id = self.store.reserve(case_id, RESERVE_PER_TURN)
-        self.store.event(case_id, "message", {"role": "user", "text": question, "photo_ids": photo_ids, "research": research, "request_id": request_id})
+        request_id = self.store.reserve(case_id, reservation)
+        self.store.event(case_id, "message", {"role": "user", "text": question, "photo_ids": photo_ids, "research": research, "request_id": request_id, **route})
         provider = self.provider_factory(key)
         cost, uncertain, records, web_urls = 0.0, False, [], set()
+        started = time.monotonic()
         try:
             for turn in range(MAX_ROUNDS):
                 if cancel.is_set():
@@ -318,10 +329,10 @@ class Assistant:
                 text_bytes += sum(len(dumps(item).encode()) for item in inputs if not isinstance(item.get("content"), list))
                 if text_bytes > 100000:
                     raise ValueError("This case's context is too large for the preview. Narrow the question or start a related case; your history is preserved.")
-                progress("Checking the case and evidence…" if turn == 0 else "Comparing the retrieved evidence…")
-                payload = {"model": settings["model"], "instructions": SYSTEM, "input": inputs,
-                           "store": False, "service_tier": "default", "max_output_tokens": MAX_OUTPUT, "max_tool_calls": 2,
-                           "reasoning": {"effort": "medium" if research else "low"},
+                progress(f"{model} · " + ("Checking the case and evidence…" if turn == 0 else "Comparing the retrieved evidence…"))
+                payload = {"model": model, "instructions": SYSTEM, "input": inputs,
+                           "store": False, "service_tier": "default", "max_output_tokens": 12000 if deep_analysis else MAX_OUTPUT, "max_tool_calls": 2,
+                           "reasoning": {"effort": effort},
                            "text": {"format": {"type": "json_schema", "name": "bench_plan", "strict": True, "schema": PLAN_SCHEMA}},
                            "tools": tools, "parallel_tool_calls": False}
                 if research:
@@ -333,12 +344,12 @@ class Assistant:
                 if not isinstance(usage, dict) or not all(isinstance(usage.get(k), int) and usage[k] >= 0 for k in ("input_tokens", "output_tokens")):
                     uncertain = True
                     raise ValueError("The provider did not return usable billing information; the reserved estimate has been kept.")
-                input_rate, output_rate = PRICES[settings["model"]]
+                input_rate, output_rate = PRICES[model]
                 output = response.get("output", [])
                 searches = sum(item.get("type") == "web_search_call" for item in output)
                 call_cost = (usage["input_tokens"] * input_rate + usage["output_tokens"] * output_rate) / 1e6 + searches * .01
                 cost += call_cost
-                records.append({"response_id": response.get("id"), "model": settings["model"], "usage": usage, "search_calls": searches, "estimated_cost": call_cost})
+                records.append({"response_id": response.get("id"), **route, "usage": usage, "search_calls": searches, "estimated_cost": call_cost})
                 if response.get("status") != "completed":
                     raise ValueError("The AI response was incomplete. No partial test was accepted. Your readings are saved.")
                 for item in output:
@@ -380,11 +391,12 @@ class Assistant:
                 before_ids = {e["id"] for e in active if e["kind"] in ("measurement", "pin", "note", "outcome")}
                 after_ids = {e["id"] for e in current["events"] if not e["retracted"] and e["kind"] in ("measurement", "pin", "note", "outcome")}
                 stale = before_ids != after_ids or case["sources"] != current["sources"]
-                saved = self.store.event(case_id, "plan", {"plan": plan, "evidence": evidence, "request_id": request_id, "estimated_cost": cost, "coverage": context["coverage"], "stale": stale})
-                return {"plan_id": saved["id"], "estimated_cost": cost, "stale": stale}
+                saved = self.store.event(case_id, "plan", {"plan": plan, "evidence": evidence, "request_id": request_id, "estimated_cost": cost, "coverage": context["coverage"], "stale": stale,
+                                                           **route, "elapsed_seconds": round(time.monotonic() - started, 3)})
+                return {"plan_id": saved["id"], "estimated_cost": cost, "stale": stale, **route}
             raise ValueError("The assistant reached its lookup limit. No speculative plan was accepted. Ask a narrower question.")
         except ProviderError as exc:
             uncertain = exc.uncertain
             raise
         finally:
-            self.store.settle(request_id, None if uncertain else cost, {"calls": records, "pricing_checked": "2026-10-17", "conservative_cache_estimate": True})
+            self.store.settle(request_id, None if uncertain else cost, {"calls": records, **route, "pricing_checked": "2026-10-18", "conservative_cache_estimate": True})

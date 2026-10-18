@@ -7,6 +7,10 @@ choose the next test, and retain confirmed repair outcomes.
 validation. It is not yet proven faster or more accurate on shop repairs. No live
 AI diagnosis or native-window acceptance test is implied by the automated tests.
 
+**First milestone: one boardview and its matching schematic, for one exact board
+and revision.** Verify the import against FlexBV 5.1244 and replay a repair with a
+known outcome before expanding to other boards or file formats.
+
 ## Start on a Mac
 
 The intended everyday launch is **BoardBrain.app from Finder or the Dock**. Cases
@@ -36,8 +40,11 @@ Native PDF text and the visual page viewer work without it.
 2. Save readings and observations. Quick entry supports `PP3V3 = 3.28 V`,
    `U7000.1 = 12 kΩ` and `USB_D+ = diode 0.42 V`; review conditions before saving.
 3. Add photos, PDFs and boardviews. Check the visible import status and file scope.
-4. Ask for the next test. Select photos explicitly; enable online research when
-   needed. Exact lookups and saving readings incur no AI charge.
+4. Ask for the next test. Standard analysis defaults to **GPT-6.1 Sol**. Use
+   **Deeper analysis** for **GPT-6 Astra** on difficult cases; it can take longer
+   and costs more. Select photos explicitly; enable online research when needed.
+   The response records its model, elapsed time and estimated cost. Exact lookups
+   and saving readings incur no AI charge.
 5. Correct an incorrect observation by retracting it and recording the correction.
 6. Confirm a repair only after recording the fix and post-repair verification.
    Keep suspected causes separate from verified causes.

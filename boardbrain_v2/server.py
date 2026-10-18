@@ -89,7 +89,7 @@ class App:
                     raise ValueError("Reopen this case to continue the diagnosis.")
                 if any(j["case_id"] == case_id and j["kind"] == "import" and j["status"] in ("queued", "running", "stopping") for j in self.jobs.list()):
                     raise ValueError("Wait for the file import to finish so the assistant has its evidence.")
-                return self.jobs.submit(case_id, "assistant", lambda cancel, progress: self.assistant.run(case_id, data["question"], data.get("photo_ids", []), data.get("research") is True, cancel, progress))
+                return self.jobs.submit(case_id, "assistant", lambda cancel, progress: self.assistant.run(case_id, data["question"], data.get("photo_ids", []), data.get("research") is True, cancel, progress, deep_analysis=data.get("deep_analysis") is True))
             if path == "/api/cancel":
                 self.jobs.cancel(data["id"])
                 return {"ok": True}
